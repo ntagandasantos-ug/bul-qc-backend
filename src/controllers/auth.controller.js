@@ -240,3 +240,156 @@ exports.changeUsername = async (req, res) => {
     return res.status(500).json({ error: 'Failed to change username' });
   }
 };
+const { sendVerificationCode } = require('../utils/emailService');
+
+// Generate 6-digit code
+function genCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+// REQUEST VERIFICATION CODE
+exports.requestChangeCode = async (req, res) => {
+  try {
+    const { username, password, changeType } = req.body;
+    if (!username || !password || !changeType) {
+      return res.status(400).json({ error: 'All fields required' });
+    }
+
+    // Verify credentials first
+    const { data: rows } = await supabase.rpc('verify_user_password', {
+      p_username: username.trim().toLowerCase(),
+      p_password: password,
+    });
+
+    if (!rows || rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid username or password' });
+    }
+
+    const user = rows[0];
+    if (!user.email) {
+      return res.status(400).json({
+        error: 'No email address on file for this account. Contact QC Head.',
+      });
+    }
+
+    const code    = genCode();
+    const expires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    // Save code to database
+    await supabase.from('app_users').update({
+      verify_code         : code,
+      verify_code_expires : expires.toISOString(),
+      verify_change_type  : changeType,
+    }).eq('id', user.id);
+
+    // Send email
+    const sent = await sendVerificationCode(user.email, code, changeType);
+    if (!sent) {
+      return res.status(500).json({
+        error: 'Failed to send email. Check email settings in .env',
+      });
+    }
+
+    // Mask the email for display
+    const [localPart, domain] = user.email.split('@');
+    const masked = localPart.substring(0,2) + '***@' + domain;
+
+    res.json({
+      message: `Verification code sent to ${masked}`,
+      masked,
+    });
+  } catch (err) {
+    console.error('requestChangeCode error:', err.message);
+    res.status(500).json({ error: 'Failed to send verification code' });
+  }
+};
+
+// CHANGE PASSWORD WITH CODE VERIFICATION
+exports.changePasswordWithCode = async (req, res) => {
+  try {
+    const { oldPassword, newPassword, verifyCode } = req.body;
+    if (!verifyCode) {
+      return res.status(400).json({ error: 'Verification code required' });
+    }
+
+    // Check code
+    const { data: u } = await supabase
+      .from('app_users')
+      .select('verify_code, verify_code_expires, verify_change_type')
+      .eq('id', req.user.id)
+      .single();
+
+    if (u.verify_change_type !== 'password') {
+      return res.status(400).json({ error: 'No password change was requested' });
+    }
+    if (u.verify_code !== verifyCode) {
+      return res.status(400).json({ error: 'Wrong verification code' });
+    }
+    if (new Date() > new Date(u.verify_code_expires)) {
+      return res.status(400).json({ error: 'Verification code expired. Request a new one.' });
+    }
+
+    // Change the password
+    const { data: ok } = await supabase.rpc('update_user_password', {
+      p_user_id      : req.user.id,
+      p_old_password : oldPassword,
+      p_new_password : newPassword,
+    });
+    if (!ok) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+
+    // Clear the code
+    await supabase.from('app_users').update({
+      verify_code: null, verify_code_expires: null, verify_change_type: null,
+    }).eq('id', req.user.id);
+
+    res.json({ message: 'Password changed successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to change password' });
+  }
+};
+
+// CHANGE USERNAME WITH CODE VERIFICATION
+exports.changeUsernameWithCode = async (req, res) => {
+  try {
+    const { newUsername, verifyCode } = req.body;
+    if (!verifyCode) {
+      return res.status(400).json({ error: 'Verification code required' });
+    }
+
+    const { data: u } = await supabase
+      .from('app_users')
+      .select('verify_code, verify_code_expires, verify_change_type')
+      .eq('id', req.user.id)
+      .single();
+
+    if (u.verify_change_type !== 'username') {
+      return res.status(400).json({ error: 'No username change was requested' });
+    }
+    if (u.verify_code !== verifyCode) {
+      return res.status(400).json({ error: 'Wrong verification code' });
+    }
+    if (new Date() > new Date(u.verify_code_expires)) {
+      return res.status(400).json({ error: 'Code expired. Request a new one.' });
+    }
+
+    const clean = newUsername.trim().toLowerCase();
+    const { data: taken } = await supabase
+      .from('app_users').select('id').eq('username', clean).single();
+    if (taken) {
+      return res.status(400).json({ error: 'Username already taken' });
+    }
+
+    await supabase.from('app_users')
+      .update({
+        username: clean,
+        verify_code: null, verify_code_expires: null, verify_change_type: null,
+      })
+      .eq('id', req.user.id);
+
+    res.json({ message: `Username changed to "${clean}"` });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to change username' });
+  }
+};
