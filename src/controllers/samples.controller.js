@@ -51,7 +51,8 @@ exports.registerSample = async (req, res) => {
         registered_by  : req.user.id,
         shift_id       : session?.shift_id || null,
         batch_number   : batch_number || null,
-        notes          : notes || null,
+        notes          : notes || null, 
+        sampler_name   : req.body.sampler_name || null,
         status         : 'pending',
       })
       .select(`
