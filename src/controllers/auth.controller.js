@@ -106,10 +106,8 @@ async function buildSession(res, user, signingAs, req) {
   try {
     // Expire old sessions for this user
     await supabase
-      .from('active_sessions')
-      .update({ is_expired: true, logged_out_at: new Date().toISOString() })
-      .eq('user_id', user.id)
-      .eq('is_expired', false);
+      // Multi-device allowed — each device gets its own session
+
 
     // Set 12-hour expiry
     const expiresAt = new Date();
