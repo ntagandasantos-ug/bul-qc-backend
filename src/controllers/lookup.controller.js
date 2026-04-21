@@ -1,95 +1,125 @@
+// ============================================================
+// FILE 3: backend/src/controllers/lookup.controller.js
+// Complete replacement — fixes empty dropdowns
+// ============================================================
+
 const supabase = require('../config/supabase');
 
-// Get all departments
+// ── Departments ───────────────────────────────────────────
 exports.getDepartments = async (_req, res) => {
-  const { data, error } = await supabase.from('departments').select('*').order('name');
-  if (error) return res.status(400).json({ error: error.message });
-  res.json({ departments: data });
+  try {
+    const { data, error } = await supabase
+      .from('departments')
+      .select('*')
+      .order('name');
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ departments: data || [] });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to load departments' });
+  }
 };
 
-// Get sample categories for a department
+// ── Sample categories for a department ───────────────────
 exports.getSampleCategories = async (req, res) => {
-  const { department_id } = req.params;
-  const { data, error } = await supabase
-    .from('sample_categories')
-    .select('*')
-    .eq('department_id', department_id)
-    .order('name');
-  if (error) return res.status(400).json({ error: error.message });
-  res.json({ categories: data });
+  try {
+    const { department_id } = req.params;
+    const { data, error } = await supabase
+      .from('sample_categories')
+      .select('*')
+      .eq('department_id', department_id)
+      .order('name');
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ categories: data || [] });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to load categories' });
+  }
 };
 
-// Get sample types for a category
+// ── Sample types for a category ───────────────────────────
 exports.getSampleTypes = async (req, res) => {
-  const { category_id } = req.params;
-  const { data, error } = await supabase
-    .from('sample_types')
-    .select('*')
-    .eq('category_id', category_id)
-    .order('name');
-  if (error) return res.status(400).json({ error: error.message });
-  res.json({ sampleTypes: data });
+  try {
+    const { category_id } = req.params;
+    const { data, error } = await supabase
+      .from('sample_types')
+      .select('*')
+      .eq('category_id', category_id)
+      .order('name');
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ sampleTypes: data || [] });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to load sample types' });
+  }
 };
 
-// Get subtypes for a category
+// ── Subtypes for a category ───────────────────────────────
 exports.getSubtypes = async (req, res) => {
-  const { category_id } = req.params;
-  const { data, error } = await supabase
-    .from('sample_subtypes')
-    .select('*')
-    .eq('category_id', category_id);
-  if (error) return res.status(400).json({ error: error.message });
-  res.json({ subtypes: data });
+  try {
+    const { category_id } = req.params;
+    const { data, error } = await supabase
+      .from('sample_subtypes')
+      .select('*')
+      .eq('category_id', category_id);
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ subtypes: data || [] });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to load subtypes' });
+  }
 };
 
-// Get brands for a department
+// ── Brands for a department ───────────────────────────────
 exports.getBrands = async (req, res) => {
-  const { department_id } = req.params;
-  const { data, error } = await supabase
-    .from('brands')
-    .select('*')
-    .eq('department_id', department_id)
-    .order('name');
-  if (error) return res.status(400).json({ error: error.message });
-  res.json({ brands: data });
+  try {
+    const { department_id } = req.params;
+    const { data, error } = await supabase
+      .from('brands')
+      .select('*')
+      .eq('department_id', department_id)
+      .order('name');
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ brands: data || [] });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to load brands' });
+  }
 };
 
-// Get tests for a sample type (with specifications)
+// ── Tests for a sample type (with specs) ──────────────────
 exports.getTests = async (req, res) => {
-  const { sample_type_id } = req.params;
-  const { brand_id, subtype_id } = req.query;
+  try {
+    const { sample_type_id } = req.params;
+    const { brand_id, subtype_id } = req.query;
 
-  const { data: tests, error } = await supabase
-    .from('tests')
-    .select(`
-      *,
-      test_specifications (
-        min_value, max_value, display_spec,
-        brand_id, subtype_id, text_acceptable_values
-      )
-    `)
-    .eq('sample_type_id', sample_type_id)
-    .order('display_order');
+    const { data: tests, error } = await supabase
+      .from('tests')
+      .select(`
+        *,
+        test_specifications (
+          min_value, max_value, display_spec,
+          brand_id, subtype_id, text_acceptable_values
+        )
+      `)
+      .eq('sample_type_id', sample_type_id)
+      .order('display_order');
 
-  if (error) return res.status(400).json({ error: error.message });
+    if (error) return res.status(400).json({ error: error.message });
 
-  // Attach the best matching spec to each test
-  const testsWithSpec = tests.map(test => {
-    const specs = test.test_specifications || [];
-    const spec =
-      specs.find(s => s.brand_id === brand_id   && s.subtype_id === subtype_id) ||
-      specs.find(s => s.brand_id === brand_id   && !s.subtype_id)               ||
-      specs.find(s => !s.brand_id               && s.subtype_id === subtype_id) ||
-      specs.find(s => !s.brand_id               && !s.subtype_id)               ||
-      null;
+    const testsWithSpec = (tests || []).map(test => {
+      const specs = test.test_specifications || [];
+      const spec =
+        specs.find(s => s.brand_id === brand_id   && s.subtype_id === subtype_id)  ||
+        specs.find(s => s.brand_id === brand_id   && !s.subtype_id)                ||
+        specs.find(s => !s.brand_id               && s.subtype_id === subtype_id)  ||
+        specs.find(s => !s.brand_id               && !s.subtype_id)                ||
+        null;
+      return { ...test, specification: spec };
+    });
 
-    return { ...test, specification: spec };
-  });
-
-  res.json({ tests: testsWithSpec });
+    res.json({ tests: testsWithSpec });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to load tests' });
+  }
 };
 
-// Get sample name presets for a department
+// ── Sample name presets ───────────────────────────────────
 exports.getSampleNamePresets = async (req, res) => {
   try {
     const { department_id } = req.params;
@@ -110,15 +140,15 @@ exports.getSampleNamePresets = async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
 
-    console.log(`Sample name presets for ${department_id}:`, data?.length);
+    console.log(`Sample presets for dept ${department_id}:`, data?.length ?? 0);
     res.json({ presets: data || [] });
   } catch (err) {
-    console.error('getSampleNamePresets catch:', err.message);
+    console.error('getSampleNamePresets crash:', err.message);
     res.status(500).json({ error: 'Failed to load sample name presets' });
   }
 };
 
-// Add a new sample name preset
+// ── Add new sample name preset ────────────────────────────
 exports.addSampleNamePreset = async (req, res) => {
   try {
     const { department_id, name } = req.body;
@@ -142,8 +172,7 @@ exports.addSampleNamePreset = async (req, res) => {
       .single();
 
     if (error) {
-      console.error('addSampleNamePreset error:', error.message);
-      // If duplicate, just return success with existing
+      // Duplicate — return existing
       if (error.code === '23505') {
         const { data: existing } = await supabase
           .from('sample_name_presets')
@@ -158,12 +187,12 @@ exports.addSampleNamePreset = async (req, res) => {
 
     res.status(201).json({ preset: data });
   } catch (err) {
-    console.error('addSampleNamePreset catch:', err.message);
+    console.error('addSampleNamePreset crash:', err.message);
     res.status(500).json({ error: 'Failed to add sample name' });
   }
 };
 
-// Get all lab staff
+// ── Get lab staff (analysts and samplers) ─────────────────
 exports.getLabStaff = async (req, res) => {
   try {
     const { role } = req.query;
@@ -185,15 +214,15 @@ exports.getLabStaff = async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
 
-    console.log('Lab staff loaded:', data?.length);
+    console.log('Lab staff loaded:', data?.length ?? 0);
     res.json({ staff: data || [] });
   } catch (err) {
-    console.error('getLabStaff catch:', err.message);
+    console.error('getLabStaff crash:', err.message);
     res.status(500).json({ error: 'Failed to load staff list' });
   }
 };
 
-// Add a new staff member
+// ── Add new lab staff member ──────────────────────────────
 exports.addLabStaff = async (req, res) => {
   try {
     const { full_name, role } = req.body;
@@ -216,7 +245,6 @@ exports.addLabStaff = async (req, res) => {
 
     if (error) {
       if (error.code === '23505') {
-        // Already exists — return existing
         const { data: existing } = await supabase
           .from('lab_staff')
           .select('id, full_name, role')
@@ -229,6 +257,7 @@ exports.addLabStaff = async (req, res) => {
 
     res.status(201).json({ staff: data });
   } catch (err) {
+    console.error('addLabStaff crash:', err.message);
     res.status(500).json({ error: 'Failed to add staff member' });
   }
 };
