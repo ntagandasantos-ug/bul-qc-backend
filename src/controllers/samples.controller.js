@@ -86,11 +86,9 @@ exports.registerSample = async (req, res) => {
 exports.getSamples = async (req, res) => {
   try {
     const {
-      department_id,
-      status,
-      date,
-      limit  = 100,
-      offset = 0,
+      department_id, status,
+      date, fromDate, toDate,
+      limit = 100, offset = 0
     } = req.query;
 
     let query = supabase
@@ -116,7 +114,15 @@ exports.getSamples = async (req, res) => {
 
     if (status) query = query.eq('status', status);
 
-    if (date) {
+    if (fromDate && toDate) {
+      // Date range filter
+      const start = new Date(fromDate); start.setHours(0, 0, 0, 0);
+      const end   = new Date(toDate);   end.setHours(23, 59, 59, 999);
+      query = query
+        .gte('registered_at', start.toISOString())
+        .lte('registered_at', end.toISOString());
+    } else if (date) {
+      // Single date filter
       const start = new Date(date); start.setHours(0, 0, 0, 0);
       const end   = new Date(date); end.setHours(23, 59, 59, 999);
       query = query
