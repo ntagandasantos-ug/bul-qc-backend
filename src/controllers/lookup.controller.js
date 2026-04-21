@@ -91,61 +91,144 @@ exports.getTests = async (req, res) => {
 
 // Get sample name presets for a department
 exports.getSampleNamePresets = async (req, res) => {
-  const { department_id } = req.params;
-  const { data, error } = await supabase
-    .from('sample_name_presets')
-    .select('id, name')
-    .eq('department_id', department_id)
-    .eq('is_active', true)
-    .order('name');
-  if (error) return res.status(400).json({ error: error.message });
-  res.json({ presets: data || [] });
+  try {
+    const { department_id } = req.params;
+
+    if (!department_id) {
+      return res.status(400).json({ error: 'department_id required' });
+    }
+
+    const { data, error } = await supabase
+      .from('sample_name_presets')
+      .select('id, name')
+      .eq('department_id', department_id)
+      .eq('is_active', true)
+      .order('name', { ascending: true });
+
+    if (error) {
+      console.error('getSampleNamePresets error:', error.message);
+      return res.status(400).json({ error: error.message });
+    }
+
+    console.log(`Sample name presets for ${department_id}:`, data?.length);
+    res.json({ presets: data || [] });
+  } catch (err) {
+    console.error('getSampleNamePresets catch:', err.message);
+    res.status(500).json({ error: 'Failed to load sample name presets' });
+  }
 };
 
 // Add a new sample name preset
 exports.addSampleNamePreset = async (req, res) => {
-  const { department_id, name } = req.body;
-  if (!name?.trim() || !department_id) {
-    return res.status(400).json({ error: 'Name and department required' });
+  try {
+    const { department_id, name } = req.body;
+
+    if (!name?.trim()) {
+      return res.status(400).json({ error: 'Sample name is required' });
+    }
+    if (!department_id) {
+      return res.status(400).json({ error: 'Department is required' });
+    }
+
+    const { data, error } = await supabase
+      .from('sample_name_presets')
+      .insert({
+        department_id,
+        name      : name.trim(),
+        created_by: req.user.id,
+        is_active : true,
+      })
+      .select('id, name')
+      .single();
+
+    if (error) {
+      console.error('addSampleNamePreset error:', error.message);
+      // If duplicate, just return success with existing
+      if (error.code === '23505') {
+        const { data: existing } = await supabase
+          .from('sample_name_presets')
+          .select('id, name')
+          .eq('department_id', department_id)
+          .eq('name', name.trim())
+          .single();
+        return res.status(200).json({ preset: existing });
+      }
+      return res.status(400).json({ error: error.message });
+    }
+
+    res.status(201).json({ preset: data });
+  } catch (err) {
+    console.error('addSampleNamePreset catch:', err.message);
+    res.status(500).json({ error: 'Failed to add sample name' });
   }
-  const { data, error } = await supabase
-    .from('sample_name_presets')
-    .insert({
-      department_id,
-      name        : name.trim(),
-      created_by  : req.user.id,
-    })
-    .select('id, name')
-    .single();
-  if (error) return res.status(400).json({ error: error.message });
-  res.status(201).json({ preset: data });
 };
 
 // Get all lab staff
 exports.getLabStaff = async (req, res) => {
-  const { role } = req.query; // 'Analyst', 'Sampler', or 'Both'
-  let query = supabase
-    .from('lab_staff')
-    .select('id, full_name, role')
-    .eq('is_active', true)
-    .order('full_name');
-  if (role) query = query.or(`role.eq.${role},role.eq.Both`);
-  const { data, error } = await query;
-  if (error) return res.status(400).json({ error: error.message });
-  res.json({ staff: data || [] });
+  try {
+    const { role } = req.query;
+
+    let query = supabase
+      .from('lab_staff')
+      .select('id, full_name, role')
+      .eq('is_active', true)
+      .order('full_name', { ascending: true });
+
+    if (role && role !== 'All') {
+      query = query.or(`role.eq.${role},role.eq.Both`);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error('getLabStaff error:', error.message);
+      return res.status(400).json({ error: error.message });
+    }
+
+    console.log('Lab staff loaded:', data?.length);
+    res.json({ staff: data || [] });
+  } catch (err) {
+    console.error('getLabStaff catch:', err.message);
+    res.status(500).json({ error: 'Failed to load staff list' });
+  }
 };
 
 // Add a new staff member
 exports.addLabStaff = async (req, res) => {
-  const { full_name, role } = req.body;
-  if (!full_name?.trim() || !role) {
-    return res.status(400).json({ error: 'Name and role required' });
+  try {
+    const { full_name, role } = req.body;
+
+    if (!full_name?.trim()) {
+      return res.status(400).json({ error: 'Full name is required' });
+    }
+
+    const staffRole = role || 'Both';
+
+    const { data, error } = await supabase
+      .from('lab_staff')
+      .insert({
+        full_name : full_name.trim(),
+        role      : staffRole,
+        is_active : true,
+      })
+      .select('id, full_name, role')
+      .single();
+
+    if (error) {
+      if (error.code === '23505') {
+        // Already exists — return existing
+        const { data: existing } = await supabase
+          .from('lab_staff')
+          .select('id, full_name, role')
+          .eq('full_name', full_name.trim())
+          .single();
+        return res.status(200).json({ staff: existing });
+      }
+      return res.status(400).json({ error: error.message });
+    }
+
+    res.status(201).json({ staff: data });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to add staff member' });
   }
-  const { data, error } = await supabase
-    .from('lab_staff')
-    .insert({ full_name: full_name.trim(), role })
-    .select()
-    .single();
-  if (error) return res.status(400).json({ error: error.message });
-  res.status(201).json({ staff: data });
 };
