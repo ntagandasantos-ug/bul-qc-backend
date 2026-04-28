@@ -10,7 +10,10 @@ exports.getLiveResults = async (req, res) => {
       .select(`
         id, result_value, result_numeric, result_status,
         remarks, action, analyst_signature, submitted_at,
-        tests ( name, unit, result_type ),
+        tests ( name, unit, result_type, display_order,
+        test_specifications (
+        min_value, max_value, display_spec,
+        brand_id, subtype_id)),
         registered_samples !inner (
           id, sample_name, sample_number, status, registered_at,
           department_id,
