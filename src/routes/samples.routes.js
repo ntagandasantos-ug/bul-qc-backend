@@ -6,6 +6,7 @@ const { authenticate }  = require('../middleware/auth');
 router.use(authenticate); // All sample routes require login
 
 router.post('/',                  samplesController.registerSample);
+router.post('/bulk',              samplesController.registerBulkSamples);
 router.get('/',                   samplesController.getSamples);
 router.get('/:id',                samplesController.getSampleById);
 router.post('/assign-tests',      samplesController.assignTests);

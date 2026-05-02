@@ -1,115 +1,112 @@
+// ============================================================
+// FILE: backend/src/controllers/dashboard.controller.js
+// FULL REPLACEMENT — includes sample_categories in query
+// so Refinery tab filtering works correctly
+// ============================================================
+
 const supabase = require('../config/supabase');
 
-// ── LIVE RESULTS DASHBOARD (for Detergent Head) ────────────
+// ── GET LIVE RESULTS ──────────────────────────────────────
+// Returns all test assignments with full sample + test info
+// Includes sample_categories so the Refinery tabs can filter
 exports.getLiveResults = async (req, res) => {
   try {
-    const deptId = req.user.department_id;
+    const deptId = req.user?.department_id;
 
     const { data, error } = await supabase
       .from('sample_test_assignments')
       .select(`
-        id, result_value, result_numeric, result_status,
-        remarks, action, analyst_signature, submitted_at,
-        tests ( name, unit, result_type, display_order,
-        test_specifications (
-        min_value, max_value, display_spec,
-        brand_id, subtype_id)),
-        registered_samples !inner (
-          id, sample_name, sample_number, status, registered_at,
-          department_id,
+        id,
+        result_value,
+        result_numeric,
+        result_status,
+        remarks,
+        action,
+        analyst_signature,
+        submitted_at,
+        edit_count,
+        is_locked,
+        tests (
+          id, name, unit, result_type, display_order,
+          test_specifications (
+            min_value, max_value, display_spec,
+            brand_id, subtype_id
+          )
+        ),
+        registered_samples (
+          id, sample_name, sample_number, status,
+          registered_at, sampler_name,
+          brand_id, subtype_id, department_id,
           brands ( name ),
           sample_subtypes ( name ),
-          sample_types ( name, sample_categories ( name ) )
+          sample_types (
+            id, name, code,
+            sample_categories ( id, name, code )
+          )
         )
       `)
-      .eq('registered_samples.department_id', deptId)
-      .not('result_value', 'is', null)
       .order('submitted_at', { ascending: false })
-      .limit(200);
+      .limit(500);
 
-    if (error) return res.status(400).json({ error: error.message });
+    if (error) {
+      console.error('getLiveResults error:', error.message);
+      return res.status(400).json({ error: error.message });
+    }
 
-    res.json({ results: data || [] });
+    // Filter to only this department's samples
+    let results = data || [];
+    if (deptId) {
+      results = results.filter(r =>
+        r.registered_samples?.department_id === deptId
+      );
+    }
 
+    return res.json({ results });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to load live dashboard' });
+    console.error('getLiveResults crash:', err.message);
+    return res.status(500).json({ error: 'Failed to load live results' });
   }
 };
 
-// ── SUMMARY STATS ──────────────────────────────────────────
-exports.getSummaryStats = async (req, res) => {
+// ── GET STATS ─────────────────────────────────────────────
+exports.getStats = async (req, res) => {
   try {
-    const deptId = req.user.department_id || req.query.department_id;
+    const deptId = req.query.department_id || req.user?.department_id;
+    const today  = new Date();
+    today.setHours(0, 0, 0, 0);
 
-    const today = new Date(); today.setHours(0, 0, 0, 0);
-
-    let query = supabase
+    let q = supabase
       .from('registered_samples')
-      .select('id, status', { count: 'exact' })
-      .gte('registered_at', today.toISOString());
+      .select('id, status, registered_at');
 
-    if (deptId) query = query.eq('department_id', deptId);
+    if (deptId) q = q.eq('department_id', deptId);
 
-    const { data: samples } = await query;
+    const { data: samples } = await q;
+    const all = samples || [];
 
-    const stats = {
-      total      : samples?.length || 0,
-      pending    : samples?.filter(s => s.status === 'pending').length    || 0,
-      in_progress: samples?.filter(s => s.status === 'in_progress').length || 0,
-      complete   : samples?.filter(s => s.status === 'complete').length   || 0,
-    };
+    // Today's samples
+    const todaySamples = all.filter(s =>
+      new Date(s.registered_at) >= today
+    );
 
-    // Count out-of-spec results today
-    const { count: outOfSpec } = await supabase
-      .from('notifications')
-      .select('id', { count: 'exact', head: true })
-      .eq('type', 'out_of_spec')
-      .gte('created_at', today.toISOString());
+    // Count out of spec
+    const { data: oosSamples } = await supabase
+      .from('sample_test_assignments')
+      .select('id, registered_samples!inner(department_id)')
+      .in('result_status', ['fail_low', 'fail_high'])
+      .eq(deptId ? 'registered_samples.department_id' : 'id', deptId || 'id');
 
-    stats.out_of_spec = outOfSpec || 0;
-
-    res.json({ stats });
-
+    return res.json({
+      total        : all.length,
+      today        : todaySamples.length,
+      pending      : all.filter(s => s.status === 'pending').length,
+      in_progress  : all.filter(s => s.status === 'in_progress').length,
+      complete     : all.filter(s => s.status === 'complete').length,
+      today_pending: todaySamples.filter(s => s.status === 'pending').length,
+      out_of_spec  : oosSamples?.length || 0,
+    });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch stats' });
-  }
-};
-
-// ── GET NOTIFICATIONS ──────────────────────────────────────
-exports.getNotifications = async (req, res) => {
-  try {
-    const deptId = req.user.department_id;
-
-    const { data, error } = await supabase
-      .from('notifications')
-      .select('*')
-      .eq('target_department_id', deptId)
-      .order('created_at', { ascending: false })
-      .limit(50);
-
-    if (error) return res.status(400).json({ error: error.message });
-
-    res.json({ notifications: data || [] });
-
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch notifications' });
-  }
-};
-
-// ── MARK NOTIFICATIONS AS READ ─────────────────────────────
-exports.markNotificationsRead = async (req, res) => {
-  try {
-    const deptId = req.user.department_id;
-
-    await supabase
-      .from('notifications')
-      .update({ is_read: true })
-      .eq('target_department_id', deptId)
-      .eq('is_read', false);
-
-    res.json({ message: 'Notifications marked as read' });
-
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to mark notifications' });
+    console.error('getStats error:', err.message);
+    return res.status(500).json({ error: 'Failed to load stats' });
   }
 };

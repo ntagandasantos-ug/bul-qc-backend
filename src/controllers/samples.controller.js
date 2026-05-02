@@ -220,3 +220,127 @@ exports.assignTests = async (req, res) => {
     res.status(500).json({ error: 'Failed to assign tests' });
   }
 };
+
+// ============================================================
+// ADD TO: backend/src/controllers/samples.controller.js
+//
+// Add this function at the BOTTOM of the file
+// Then add the route in samples.routes.js
+// ============================================================
+
+// ── BULK REGISTER SAMPLES ─────────────────────────────────
+// Allows registering multiple samples in one request
+// Each sample in the array is independent
+exports.registerBulkSamples = async (req, res) => {
+  try {
+    const { samples } = req.body;
+
+    if (!Array.isArray(samples) || samples.length === 0) {
+      return res.status(400).json({ error: 'No samples provided' });
+    }
+
+    if (samples.length > 20) {
+      return res.status(400).json({ error: 'Maximum 20 samples per bulk registration' });
+    }
+
+    const registered = [];
+    const errors     = [];
+
+    for (let i = 0; i < samples.length; i++) {
+      const s = samples[i];
+      try {
+        if (!s.sample_name)    throw new Error('Sample name required');
+        if (!s.department_id)  throw new Error('Department required');
+        if (!s.sample_type_id) throw new Error('Sample type required');
+        if (!s.sampler_name)   throw new Error('Sampler name required');
+
+        // Generate sample number
+        const dept = await supabase
+          .from('departments')
+          .select('code')
+          .eq('id', s.department_id)
+          .single();
+
+        const year  = new Date().getFullYear();
+        const code  = dept.data?.code || 'BUL';
+        const { count } = await supabase
+          .from('registered_samples')
+          .select('id', { count: 'exact', head: true })
+          .eq('department_id', s.department_id);
+
+        const num       = String((count || 0) + 1 + i).padStart(4, '0');
+        const sampleNum = `${code}-${year}-${num}`;
+
+        const { data: newSample, error: insertErr } = await supabase
+          .from('registered_samples')
+          .insert({
+            sample_number  : sampleNum,
+            sample_name    : s.sample_name.trim(),
+            department_id  : s.department_id,
+            sample_type_id : s.sample_type_id,
+            brand_id       : s.brand_id       || null,
+            subtype_id     : s.subtype_id     || null,
+            batch_number   : s.batch_number   || null,
+            notes          : s.notes          || null,
+            sampler_name   : s.sampler_name.trim(),
+            registered_by  : req.user.id,
+            status         : 'pending',
+            registered_at  : new Date().toISOString(),
+          })
+          .select(`
+            id, sample_number, sample_name, status,
+            registered_at, sampler_name,
+            sample_types ( name ),
+            departments ( name )
+          `)
+          .single();
+
+        if (insertErr) throw new Error(insertErr.message);
+
+        registered.push({
+          index       : i,
+          sample_name : s.sample_name,
+          sampleNumber: sampleNum,
+          id          : newSample.id,
+          status      : 'success',
+        });
+
+      } catch (err) {
+        errors.push({
+          index      : i,
+          sample_name: s.sample_name || `Sample ${i+1}`,
+          error      : err.message,
+          status     : 'failed',
+        });
+      }
+    }
+
+    return res.status(201).json({
+      message    : `${registered.length} sample(s) registered successfully`,
+      registered,
+      errors,
+      total      : samples.length,
+      successful : registered.length,
+      failed     : errors.length,
+    });
+
+  } catch (err) {
+    console.error('registerBulkSamples error:', err.message);
+    return res.status(500).json({ error: 'Bulk registration failed' });
+  }
+};
+
+
+// ============================================================
+// ADD TO: backend/src/routes/samples.routes.js
+//
+// Find the existing routes and add this new one:
+// router.post('/bulk', authenticate, sc.registerBulkSamples);
+//
+// The full routes file should include:
+// router.post('/',     authenticate, sc.registerSample);
+// router.post('/bulk', authenticate, sc.registerBulkSamples);
+// router.get('/',      authenticate, sc.getSamples);
+// router.get('/:id',   authenticate, sc.getSampleById);
+// router.post('/assign-tests', authenticate, sc.assignTests);
+// ============================================================
