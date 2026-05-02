@@ -1,8 +1,4 @@
-// ============================================================
-// FILE: backend/src/controllers/dashboard.controller.js
-// FULL REPLACEMENT — includes sample_categories in query
-// so Refinery tab filtering works correctly
-// ============================================================
+
 
 const supabase = require('../config/supabase');
 
@@ -81,29 +77,21 @@ exports.getStats = async (req, res) => {
 
     if (deptId) q = q.eq('department_id', deptId);
 
-    const { data: samples } = await q;
-    const all = samples || [];
+    const { data: samples, error } = await q;
+    if (error) throw error;
 
-    // Today's samples
+    const all = samples || [];
     const todaySamples = all.filter(s =>
       new Date(s.registered_at) >= today
     );
 
-    // Count out of spec
-    const { data: oosSamples } = await supabase
-      .from('sample_test_assignments')
-      .select('id, registered_samples!inner(department_id)')
-      .in('result_status', ['fail_low', 'fail_high'])
-      .eq(deptId ? 'registered_samples.department_id' : 'id', deptId || 'id');
-
     return res.json({
-      total        : all.length,
-      today        : todaySamples.length,
-      pending      : all.filter(s => s.status === 'pending').length,
-      in_progress  : all.filter(s => s.status === 'in_progress').length,
-      complete     : all.filter(s => s.status === 'complete').length,
-      today_pending: todaySamples.filter(s => s.status === 'pending').length,
-      out_of_spec  : oosSamples?.length || 0,
+      total       : all.length,
+      today       : todaySamples.length,
+      pending     : all.filter(s => s.status === 'pending').length,
+      in_progress : all.filter(s => s.status === 'in_progress').length,
+      complete    : all.filter(s => s.status === 'complete').length,
+      out_of_spec : 0,
     });
   } catch (err) {
     console.error('getStats error:', err.message);

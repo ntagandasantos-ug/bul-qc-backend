@@ -331,16 +331,3 @@ exports.registerBulkSamples = async (req, res) => {
 };
 
 
-// ============================================================
-// ADD TO: backend/src/routes/samples.routes.js
-//
-// Find the existing routes and add this new one:
-// router.post('/bulk', authenticate, sc.registerBulkSamples);
-//
-// The full routes file should include:
-// router.post('/',     authenticate, sc.registerSample);
-// router.post('/bulk', authenticate, sc.registerBulkSamples);
-// router.get('/',      authenticate, sc.getSamples);
-// router.get('/:id',   authenticate, sc.getSampleById);
-// router.post('/assign-tests', authenticate, sc.assignTests);
-// ============================================================
