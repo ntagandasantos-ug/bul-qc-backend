@@ -1,10 +1,11 @@
-
+// ============================================================
+// FILE: backend/src/controllers/dashboard.controller.js
+// COMPLETE CLEAN FILE — replace everything
+// ============================================================
 
 const supabase = require('../config/supabase');
 
 // ── GET LIVE RESULTS ──────────────────────────────────────
-// Returns all test assignments with full sample + test info
-// Includes sample_categories so the Refinery tabs can filter
 exports.getLiveResults = async (req, res) => {
   try {
     const deptId = req.user?.department_id;
@@ -49,8 +50,8 @@ exports.getLiveResults = async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
 
-    // Filter to only this department's samples
     let results = data || [];
+
     if (deptId) {
       results = results.filter(r =>
         r.registered_samples?.department_id === deptId
@@ -75,10 +76,15 @@ exports.getStats = async (req, res) => {
       .from('registered_samples')
       .select('id, status, registered_at');
 
-    if (deptId) q = q.eq('department_id', deptId);
+    if (deptId) {
+      q = q.eq('department_id', deptId);
+    }
 
     const { data: samples, error } = await q;
-    if (error) throw error;
+    if (error) {
+      console.error('getStats query error:', error.message);
+      return res.status(400).json({ error: error.message });
+    }
 
     const all = samples || [];
     const todaySamples = all.filter(s =>
@@ -94,7 +100,7 @@ exports.getStats = async (req, res) => {
       out_of_spec : 0,
     });
   } catch (err) {
-    console.error('getStats error:', err.message);
+    console.error('getStats crash:', err.message);
     return res.status(500).json({ error: 'Failed to load stats' });
   }
 };
