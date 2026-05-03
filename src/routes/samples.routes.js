@@ -1,14 +1,23 @@
-const express           = require('express');
-const router            = express.Router();
-const samplesController = require('../controllers/samples.controller');
-const { authenticate }  = require('../middleware/auth');
+// ============================================================
+// FILE: backend/src/routes/samples.routes.js
+// COMPLETE REWRITE
+// ============================================================
 
-router.use(authenticate); // All sample routes require login
+'use strict';
 
-router.post('/',                  samplesController.registerSample);
-router.post('/bulk',              samplesController.registerBulkSamples);
-router.get('/',                   samplesController.getSamples);
-router.get('/:id',                samplesController.getSampleById);
-router.post('/assign-tests',      samplesController.assignTests);
+const express          = require('express');
+const router           = express.Router();
+const sc               = require('../controllers/samples.controller');
+const { authenticate } = require('../middleware/auth');
+
+router.use(authenticate);
+
+// NOTE: /bulk MUST come before /:id
+// otherwise Express matches /bulk as an id param
+router.post('/',             sc.registerSample);
+router.post('/bulk',         sc.registerBulkSamples);
+router.post('/assign-tests', sc.assignTests);
+router.get('/',              sc.getSamples);
+router.get('/:id',           sc.getSampleById);
 
 module.exports = router;

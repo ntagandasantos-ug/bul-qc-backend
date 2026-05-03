@@ -1,12 +1,34 @@
 // ============================================================
 // FILE: backend/src/controllers/samples.controller.js
-// COMPLETE CLEAN FILE — replace everything
+// COMPLETE REWRITE — all functions present and exported
 // ============================================================
+
+'use strict';
 
 const supabase = require('../config/supabase');
 
-// ── REGISTER SINGLE SAMPLE ───────────────────────────────
-exports.registerSample = async (req, res) => {
+// ── Helper: generate sample number ───────────────────────
+async function generateSampleNumber(departmentId) {
+  const { data: dept } = await supabase
+    .from('departments')
+    .select('code')
+    .eq('id', departmentId)
+    .single();
+
+  const year = new Date().getFullYear();
+  const code = dept?.code || 'BUL';
+
+  const { count } = await supabase
+    .from('registered_samples')
+    .select('id', { count: 'exact', head: true })
+    .eq('department_id', departmentId);
+
+  const num = String((count || 0) + 1).padStart(4, '0');
+  return `${code}-${year}-${num}`;
+}
+
+// ── 1. REGISTER SINGLE SAMPLE ────────────────────────────
+exports.registerSample = async function(req, res) {
   try {
     const {
       sample_name, department_id, sample_type_id,
@@ -14,37 +36,21 @@ exports.registerSample = async (req, res) => {
       notes, sampler_name,
     } = req.body;
 
-    if (!sample_name)    return res.status(400).json({ error: 'Sample name required' });
-    if (!department_id)  return res.status(400).json({ error: 'Department required' });
-    if (!sample_type_id) return res.status(400).json({ error: 'Sample type required' });
+    if (!sample_name)    return res.status(400).json({ error: 'Sample name is required' });
+    if (!department_id)  return res.status(400).json({ error: 'Department is required' });
+    if (!sample_type_id) return res.status(400).json({ error: 'Sample type is required' });
 
-    // Get department code
-    const { data: dept } = await supabase
-      .from('departments')
-      .select('code')
-      .eq('id', department_id)
-      .single();
-
-    const year = new Date().getFullYear();
-    const code = dept?.code || 'BUL';
-
-    const { count } = await supabase
-      .from('registered_samples')
-      .select('id', { count: 'exact', head: true })
-      .eq('department_id', department_id);
-
-    const num       = String((count || 0) + 1).padStart(4, '0');
-    const sampleNum = `${code}-${year}-${num}`;
+    const sampleNumber = await generateSampleNumber(department_id);
 
     const { data: newSample, error } = await supabase
       .from('registered_samples')
       .insert({
-        sample_number  : sampleNum,
+        sample_number  : sampleNumber,
         sample_name    : sample_name.trim(),
         department_id,
         sample_type_id,
-        brand_id       : brand_id    || null,
-        subtype_id     : subtype_id  || null,
+        brand_id       : brand_id     || null,
+        subtype_id     : subtype_id   || null,
         batch_number   : batch_number || null,
         notes          : notes        || null,
         sampler_name   : sampler_name || null,
@@ -52,11 +58,7 @@ exports.registerSample = async (req, res) => {
         status         : 'pending',
         registered_at  : new Date().toISOString(),
       })
-      .select(`
-        id, sample_number, sample_name, status, registered_at,
-        sample_types ( name ),
-        departments ( name )
-      `)
+      .select('id, sample_number, sample_name, status')
       .single();
 
     if (error) {
@@ -65,8 +67,8 @@ exports.registerSample = async (req, res) => {
     }
 
     return res.status(201).json({
-      message      : `Sample ${sampleNum} registered successfully`,
-      sampleNumber : sampleNum,
+      message      : `Sample ${sampleNumber} registered successfully`,
+      sampleNumber,
       sample       : newSample,
     });
   } catch (err) {
@@ -75,8 +77,8 @@ exports.registerSample = async (req, res) => {
   }
 };
 
-// ── BULK REGISTER SAMPLES ─────────────────────────────────
-exports.registerBulkSamples = async (req, res) => {
+// ── 2. BULK REGISTER SAMPLES ─────────────────────────────
+exports.registerBulkSamples = async function(req, res) {
   try {
     const { samples } = req.body;
 
@@ -85,7 +87,7 @@ exports.registerBulkSamples = async (req, res) => {
     }
 
     if (samples.length > 20) {
-      return res.status(400).json({ error: 'Maximum 20 samples per bulk registration' });
+      return res.status(400).json({ error: 'Maximum 20 samples per request' });
     }
 
     const registered = [];
@@ -99,7 +101,6 @@ exports.registerBulkSamples = async (req, res) => {
         if (!s.sample_type_id) throw new Error('Sample type required');
         if (!s.sampler_name)   throw new Error('Sampler name required');
 
-        // Get department code
         const { data: dept } = await supabase
           .from('departments')
           .select('code')
@@ -171,8 +172,8 @@ exports.registerBulkSamples = async (req, res) => {
   }
 };
 
-// ── GET SAMPLES LIST ─────────────────────────────────────
-exports.getSamples = async (req, res) => {
+// ── 3. GET SAMPLES LIST ───────────────────────────────────
+exports.getSamples = async function(req, res) {
   try {
     const {
       department_id, status,
@@ -192,7 +193,7 @@ exports.getSamples = async (req, res) => {
           sample_categories ( name, code )
         ),
         brands ( name ),
-        sample_subtypes ( name ),
+        sample_subtypes ( name )
       `)
       .order('registered_at', { ascending: false })
       .limit(parseInt(limit));
@@ -201,19 +202,22 @@ exports.getSamples = async (req, res) => {
     if (status)        q = q.eq('status', status);
 
     if (fromDate && toDate) {
-      const start = new Date(fromDate); start.setHours(0,0,0,0);
-      const end   = new Date(toDate);   end.setHours(23,59,59,999);
+      const start = new Date(fromDate); start.setHours(0, 0, 0, 0);
+      const end   = new Date(toDate);   end.setHours(23, 59, 59, 999);
       q = q.gte('registered_at', start.toISOString())
            .lte('registered_at', end.toISOString());
     } else if (date) {
-      const start = new Date(date); start.setHours(0,0,0,0);
-      const end   = new Date(date); end.setHours(23,59,59,999);
+      const start = new Date(date); start.setHours(0, 0, 0, 0);
+      const end   = new Date(date); end.setHours(23, 59, 59, 999);
       q = q.gte('registered_at', start.toISOString())
            .lte('registered_at', end.toISOString());
     }
 
     const { data, error } = await q;
-    if (error) return res.status(400).json({ error: error.message });
+    if (error) {
+      console.error('getSamples error:', error.message);
+      return res.status(400).json({ error: error.message });
+    }
 
     return res.json({ samples: data || [] });
   } catch (err) {
@@ -222,8 +226,8 @@ exports.getSamples = async (req, res) => {
   }
 };
 
-// ── GET SINGLE SAMPLE ────────────────────────────────────
-exports.getSampleById = async (req, res) => {
+// ── 4. GET SINGLE SAMPLE BY ID ────────────────────────────
+exports.getSampleById = async function(req, res) {
   try {
     const { id } = req.params;
 
@@ -265,5 +269,56 @@ exports.getSampleById = async (req, res) => {
   } catch (err) {
     console.error('getSampleById crash:', err.message);
     return res.status(500).json({ error: 'Failed to load sample' });
+  }
+};
+
+// ── 5. ASSIGN TESTS TO SAMPLE ────────────────────────────
+exports.assignTests = async function(req, res) {
+  try {
+    const { sample_id, test_ids } = req.body;
+
+    if (!sample_id || !Array.isArray(test_ids) || test_ids.length === 0) {
+      return res.status(400).json({ error: 'sample_id and test_ids are required' });
+    }
+
+    // Delete existing unsubmitted assignments
+    await supabase
+      .from('sample_test_assignments')
+      .delete()
+      .eq('sample_id', sample_id)
+      .is('result_value', null);
+
+    // Insert new assignments
+    const inserts = test_ids.map(testId => ({
+      sample_id,
+      test_id    : testId,
+      assigned_by: req.user.id,
+      assigned_at: new Date().toISOString(),
+    }));
+
+    const { data, error } = await supabase
+      .from('sample_test_assignments')
+      .insert(inserts)
+      .select();
+
+    if (error) {
+      console.error('assignTests error:', error.message);
+      return res.status(400).json({ error: error.message });
+    }
+
+    // Move sample to in_progress
+    await supabase
+      .from('registered_samples')
+      .update({ status: 'in_progress' })
+      .eq('id', sample_id)
+      .eq('status', 'pending');
+
+    return res.json({
+      message    : `${data.length} test(s) assigned successfully`,
+      assignments: data,
+    });
+  } catch (err) {
+    console.error('assignTests crash:', err.message);
+    return res.status(500).json({ error: 'Failed to assign tests' });
   }
 };
