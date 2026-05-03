@@ -1,12 +1,17 @@
-const express            = require('express');
-const router             = express.Router();
-const resultsController  = require('../controllers/results.controller');
-const { authenticate }   = require('../middleware/auth');
+// ============================================================
+// FILE: backend/src/routes/results.routes.js
+// ============================================================
+
+'use strict';
+
+const express          = require('express');
+const router           = express.Router();
+const rc               = require('../controllers/results.controller');
+const { authenticate } = require('../middleware/auth');
 
 router.use(authenticate);
 
-router.post('/submit',                        resultsController.submitResult);
-router.get('/sample/:sample_id',              resultsController.getResultsBySample);
-router.get('/history/:assignment_id',         resultsController.getEditHistory);
+router.put('/:id',            rc.submitResult);
+router.get('/sample/:sampleId', rc.getResultsBySample);
 
 module.exports = router;
