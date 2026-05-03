@@ -1,13 +1,14 @@
 // ============================================================
 // FILE: backend/src/controllers/samples.controller.js
-// COMPLETE REWRITE — all functions present and exported
+// FIXES: duplicate sample number, bulk registration
 // ============================================================
 
 'use strict';
 
 const supabase = require('../config/supabase');
 
-// ── Helper: generate sample number ───────────────────────
+// ── Helper: generate unique sample number ─────────────────
+// Uses MAX existing number + 1 to avoid duplicates
 async function generateSampleNumber(departmentId) {
   const { data: dept } = await supabase
     .from('departments')
@@ -15,16 +16,27 @@ async function generateSampleNumber(departmentId) {
     .eq('id', departmentId)
     .single();
 
-  const year = new Date().getFullYear();
-  const code = dept?.code || 'BUL';
+  const year   = new Date().getFullYear();
+  const code   = dept?.code || 'BUL';
+  const prefix = `${code}-${year}-`;
 
-  const { count } = await supabase
+  // Find the highest existing sample number for this dept+year
+  const { data: existing } = await supabase
     .from('registered_samples')
-    .select('id', { count: 'exact', head: true })
-    .eq('department_id', departmentId);
+    .select('sample_number')
+    .eq('department_id', departmentId)
+    .like('sample_number', `${prefix}%`)
+    .order('sample_number', { ascending: false })
+    .limit(1);
 
-  const num = String((count || 0) + 1).padStart(4, '0');
-  return `${code}-${year}-${num}`;
+  let nextNum = 1;
+  if (existing && existing.length > 0) {
+    const lastNum = existing[0].sample_number.replace(prefix, '');
+    const parsed  = parseInt(lastNum, 10);
+    if (!isNaN(parsed)) nextNum = parsed + 1;
+  }
+
+  return `${prefix}${String(nextNum).padStart(4, '0')}`;
 }
 
 // ── 1. REGISTER SINGLE SAMPLE ────────────────────────────
@@ -78,6 +90,7 @@ exports.registerSample = async function(req, res) {
 };
 
 // ── 2. BULK REGISTER SAMPLES ─────────────────────────────
+// Each sample gets a fresh number sequentially
 exports.registerBulkSamples = async function(req, res) {
   try {
     const { samples } = req.body;
@@ -85,7 +98,6 @@ exports.registerBulkSamples = async function(req, res) {
     if (!Array.isArray(samples) || samples.length === 0) {
       return res.status(400).json({ error: 'No samples provided' });
     }
-
     if (samples.length > 20) {
       return res.status(400).json({ error: 'Maximum 20 samples per request' });
     }
@@ -101,22 +113,8 @@ exports.registerBulkSamples = async function(req, res) {
         if (!s.sample_type_id) throw new Error('Sample type required');
         if (!s.sampler_name)   throw new Error('Sampler name required');
 
-        const { data: dept } = await supabase
-          .from('departments')
-          .select('code')
-          .eq('id', s.department_id)
-          .single();
-
-        const year = new Date().getFullYear();
-        const code = dept?.code || 'BUL';
-
-        const { count } = await supabase
-          .from('registered_samples')
-          .select('id', { count: 'exact', head: true })
-          .eq('department_id', s.department_id);
-
-        const num       = String((count || 0) + 1 + i).padStart(4, '0');
-        const sampleNum = `${code}-${year}-${num}`;
+        // Fresh number each iteration avoids duplicates
+        const sampleNum = await generateSampleNumber(s.department_id);
 
         const { data: newSample, error: insertErr } = await supabase
           .from('registered_samples')
@@ -178,7 +176,7 @@ exports.getSamples = async function(req, res) {
     const {
       department_id, status,
       date, fromDate, toDate,
-      limit = 100,
+      limit = 200,
     } = req.query;
 
     let q = supabase
@@ -202,13 +200,13 @@ exports.getSamples = async function(req, res) {
     if (status)        q = q.eq('status', status);
 
     if (fromDate && toDate) {
-      const start = new Date(fromDate); start.setHours(0, 0, 0, 0);
-      const end   = new Date(toDate);   end.setHours(23, 59, 59, 999);
+      const start = new Date(fromDate); start.setHours(0,0,0,0);
+      const end   = new Date(toDate);   end.setHours(23,59,59,999);
       q = q.gte('registered_at', start.toISOString())
            .lte('registered_at', end.toISOString());
     } else if (date) {
-      const start = new Date(date); start.setHours(0, 0, 0, 0);
-      const end   = new Date(date); end.setHours(23, 59, 59, 999);
+      const start = new Date(date); start.setHours(0,0,0,0);
+      const end   = new Date(date); end.setHours(23,59,59,999);
       q = q.gte('registered_at', start.toISOString())
            .lte('registered_at', end.toISOString());
     }
@@ -281,14 +279,12 @@ exports.assignTests = async function(req, res) {
       return res.status(400).json({ error: 'sample_id and test_ids are required' });
     }
 
-    // Delete existing unsubmitted assignments
     await supabase
       .from('sample_test_assignments')
       .delete()
       .eq('sample_id', sample_id)
       .is('result_value', null);
 
-    // Insert new assignments
     const inserts = test_ids.map(testId => ({
       sample_id,
       test_id    : testId,
@@ -306,7 +302,6 @@ exports.assignTests = async function(req, res) {
       return res.status(400).json({ error: error.message });
     }
 
-    // Move sample to in_progress
     await supabase
       .from('registered_samples')
       .update({ status: 'in_progress' })
