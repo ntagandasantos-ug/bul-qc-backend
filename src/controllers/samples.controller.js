@@ -200,16 +200,18 @@ exports.getSamples = async function(req, res) {
     if (status)        q = q.eq('status', status);
 
     if (fromDate && toDate) {
-      const start = new Date(fromDate); start.setHours(0,0,0,0);
-      const end   = new Date(toDate);   end.setHours(23,59,59,999);
-      q = q.gte('registered_at', start.toISOString())
-           .lte('registered_at', end.toISOString());
-    } else if (date) {
-      const start = new Date(date); start.setHours(0,0,0,0);
-      const end   = new Date(date); end.setHours(23,59,59,999);
-      q = q.gte('registered_at', start.toISOString())
-           .lte('registered_at', end.toISOString());
-    }
+  // Add 3-hour offset for EAT (UTC+3)
+  const start = new Date(fromDate + 'T00:00:00+03:00');
+  const end   = new Date(toDate   + 'T23:59:59+03:00');
+  q = q.gte('registered_at', start.toISOString())
+       .lte('registered_at', end.toISOString());
+} else if (date) {
+  // Add 3-hour offset for EAT (UTC+3)
+  const start = new Date(date + 'T00:00:00+03:00');
+  const end   = new Date(date + 'T23:59:59+03:00');
+  q = q.gte('registered_at', start.toISOString())
+       .lte('registered_at', end.toISOString());
+}
 
     const { data, error } = await q;
     if (error) {
