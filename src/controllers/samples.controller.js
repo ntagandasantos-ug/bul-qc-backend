@@ -193,7 +193,6 @@ exports.getSamples = async (req, res) => {
         ),
         brands ( name ),
         sample_subtypes ( name ),
-        app_users!registered_by ( full_name )
       `)
       .order('registered_at', { ascending: false })
       .limit(parseInt(limit));
@@ -233,6 +232,7 @@ exports.getSampleById = async (req, res) => {
       .select(`
         id, sample_number, sample_name, status,
         registered_at, batch_number, notes, sampler_name,
+        department_id,
         departments ( name, code ),
         sample_types (
           id, name, code,
@@ -240,7 +240,6 @@ exports.getSampleById = async (req, res) => {
         ),
         brands ( name ),
         sample_subtypes ( name ),
-        app_users!registered_by ( full_name ),
         sample_test_assignments (
           id, result_value, result_numeric,
           result_status, remarks, action,
@@ -257,57 +256,14 @@ exports.getSampleById = async (req, res) => {
       .eq('id', id)
       .single();
 
-    if (error) return res.status(404).json({ error: 'Sample not found' });
-    return res.json({ sample: data });
-  } catch (err) {
-    return res.status(500).json({ error: 'Failed to get sample' });
-  }
-};
-
-// ── ASSIGN TESTS TO SAMPLE ───────────────────────────────
-exports.assignTests = async (req, res) => {
-  try {
-    const { sample_id, test_ids } = req.body;
-
-    if (!sample_id || !Array.isArray(test_ids) || test_ids.length === 0) {
-      return res.status(400).json({ error: 'sample_id and test_ids required' });
+    if (error) {
+      console.error('getSampleById error:', error.message);
+      return res.status(404).json({ error: 'Sample not found' });
     }
 
-    // Remove existing assignments first
-    await supabase
-      .from('sample_test_assignments')
-      .delete()
-      .eq('sample_id', sample_id)
-      .is('result_value', null);
-
-    // Insert new assignments
-    const inserts = test_ids.map(testId => ({
-      sample_id,
-      test_id    : testId,
-      assigned_by: req.user.id,
-      assigned_at: new Date().toISOString(),
-    }));
-
-    const { data, error } = await supabase
-      .from('sample_test_assignments')
-      .insert(inserts)
-      .select();
-
-    if (error) return res.status(400).json({ error: error.message });
-
-    // Update sample status to in_progress
-    await supabase
-      .from('registered_samples')
-      .update({ status: 'in_progress' })
-      .eq('id', sample_id)
-      .eq('status', 'pending');
-
-    return res.json({
-      message    : `${data.length} test(s) assigned`,
-      assignments: data,
-    });
+    return res.json({ sample: data });
   } catch (err) {
-    console.error('assignTests crash:', err.message);
-    return res.status(500).json({ error: 'Failed to assign tests' });
+    console.error('getSampleById crash:', err.message);
+    return res.status(500).json({ error: 'Failed to load sample' });
   }
 };
