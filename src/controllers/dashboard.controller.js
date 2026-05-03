@@ -104,3 +104,33 @@ exports.getStats = async (req, res) => {
     return res.status(500).json({ error: 'Failed to load stats' });
   }
 };
+
+// ── GET NOTIFICATIONS ─────────────────────────────────────
+exports.getNotifications = async (req, res) => {
+  try {
+    const { data } = await supabase
+      .from('notifications')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .eq('is_read', false)
+      .order('created_at', { ascending: false })
+      .limit(20);
+    return res.json({ notifications: data || [] });
+  } catch (err) {
+    return res.json({ notifications: [] });
+  }
+};
+
+// ── MARK NOTIFICATIONS READ ───────────────────────────────
+exports.markNotificationsRead = async (req, res) => {
+  try {
+    await supabase
+      .from('notifications')
+      .update({ is_read: true })
+      .eq('user_id', req.user.id)
+      .eq('is_read', false);
+    return res.json({ message: 'Notifications marked as read' });
+  } catch (err) {
+    return res.json({ message: 'Done' });
+  }
+};
