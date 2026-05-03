@@ -11,7 +11,7 @@ const { authenticate } = require('../middleware/auth');
 
 router.use(authenticate);
 
-router.put('/:id',            rc.submitResult);
+router.put('/:id',              rc.submitResult);
 router.get('/sample/:sampleId', rc.getResultsBySample);
 
 module.exports = router;

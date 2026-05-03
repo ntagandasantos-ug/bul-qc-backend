@@ -1,16 +1,17 @@
 // ============================================================
 // FILE: backend/src/controllers/results.controller.js
-// Handles submitting and updating test results
+// FIXED: result_edit_history crash removed, proper error handling
 // ============================================================
 
 'use strict';
 
 const supabase = require('../config/supabase');
 
-// ── SUBMIT / UPDATE A RESULT ─────────────────────────────
+// ── SUBMIT OR UPDATE A RESULT ────────────────────────────
 exports.submitResult = async function(req, res) {
   try {
     const { id } = req.params;
+
     const {
       result_value,
       analyst_signature,
@@ -27,7 +28,7 @@ exports.submitResult = async function(req, res) {
       return res.status(400).json({ error: 'Analyst signature is required' });
     }
 
-    // Get current assignment
+    // ── Fetch the current assignment ──────────────────────
     const { data: current, error: fetchErr } = await supabase
       .from('sample_test_assignments')
       .select('id, result_value, edit_count, is_locked, sample_id')
@@ -35,39 +36,50 @@ exports.submitResult = async function(req, res) {
       .single();
 
     if (fetchErr || !current) {
+      console.error('fetchErr:', fetchErr?.message);
       return res.status(404).json({ error: 'Test assignment not found' });
     }
 
     if (current.is_locked) {
-      return res.status(400).json({ error: 'This result is locked and cannot be edited' });
+      return res.status(400).json({
+        error: 'This result is locked — maximum updates reached',
+      });
     }
 
-    const isUpdate   = !!current.result_value;
-    const editCount  = (current.edit_count || 0) + (isUpdate ? 1 : 0);
-    const isLocked   = editCount >= 2;
+    const isUpdate  = !!current.result_value;
+    const prevCount = current.edit_count || 0;
+    const newCount  = isUpdate ? prevCount + 1 : prevCount;
+    const isLocked  = newCount >= 2;
 
-    // Save result history if updating
+    // ── Save edit history (safe — skip if table missing) ──
     if (isUpdate) {
-      await supabase.from('result_edit_history').insert({
-        assignment_id      : id,
-        old_result_value   : current.result_value,
-        edited_by          : req.user.id,
-        edited_at          : new Date().toISOString(),
-      }).catch(() => {});
+      try {
+        await supabase.from('result_edit_history').insert({
+          assignment_id   : id,
+          old_result_value: current.result_value,
+          edited_by       : req.user.id,
+          edited_at       : new Date().toISOString(),
+        });
+      } catch (histErr) {
+        // Table may not exist — log and continue
+        console.log('result_edit_history insert skipped:', histErr.message);
+      }
     }
 
-    // Update the assignment
+    // ── Update the assignment ─────────────────────────────
     const { data: updated, error: updateErr } = await supabase
       .from('sample_test_assignments')
       .update({
         result_value      : result_value.trim(),
-        result_numeric    : parseFloat(result_value) || null,
+        result_numeric    : isNaN(parseFloat(result_value))
+                              ? null
+                              : parseFloat(result_value),
         analyst_signature : analyst_signature.trim(),
         result_status     : result_status  || 'pass',
         remarks           : remarks        || 'OK',
         action            : action         || 'Pass',
         submitted_at      : submitted_at   || new Date().toISOString(),
-        edit_count        : editCount,
+        edit_count        : newCount,
         is_locked         : isLocked,
       })
       .eq('id', id)
@@ -75,34 +87,46 @@ exports.submitResult = async function(req, res) {
       .single();
 
     if (updateErr) {
-      console.error('submitResult update error:', updateErr.message);
+      console.error('update error:', updateErr.message);
       return res.status(400).json({ error: updateErr.message });
     }
 
-    // Check if all tests for this sample are now complete
-    const { data: allTests } = await supabase
-      .from('sample_test_assignments')
-      .select('id, result_value')
-      .eq('sample_id', current.sample_id);
+    // ── Check if all tests are now complete ───────────────
+    try {
+      const { data: allTests } = await supabase
+        .from('sample_test_assignments')
+        .select('id, result_value')
+        .eq('sample_id', current.sample_id);
 
-    const allDone = allTests?.every(t => t.result_value);
-    if (allDone) {
-      await supabase
-        .from('registered_samples')
-        .update({ status: 'complete' })
-        .eq('id', current.sample_id);
+      const allDone = allTests?.every(t => t.result_value);
+      if (allDone) {
+        await supabase
+          .from('registered_samples')
+          .update({ status: 'complete' })
+          .eq('id', current.sample_id);
+      } else {
+        // Ensure status is in_progress
+        await supabase
+          .from('registered_samples')
+          .update({ status: 'in_progress' })
+          .eq('id', current.sample_id)
+          .eq('status', 'pending');
+      }
+    } catch (statusErr) {
+      console.log('status update skipped:', statusErr.message);
     }
 
     return res.json({
-      message   : isUpdate ? 'Result updated' : 'Result submitted',
+      message   : isUpdate ? 'Result updated successfully' : 'Result submitted successfully',
       assignment: updated,
       isLocked,
-      editCount,
+      editCount : newCount,
+      isUpdate,
     });
 
   } catch (err) {
     console.error('submitResult crash:', err.message);
-    return res.status(500).json({ error: 'Failed to submit result' });
+    return res.status(500).json({ error: 'Failed to submit result: ' + err.message });
   }
 };
 
