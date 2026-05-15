@@ -18,8 +18,12 @@ const users = [
   { username: 'shift_general',  password: 'General@Shift24!' },
   { username: 'det_head',       password: 'DetHead@2024!!'   },
   { username: 'det_assistant',  password: 'DetAsst@2024!!'   },
-  { username: 'ref_head',      password: 'RefHead@2024!!'  },
-  { username: 'ref_assistant', password: 'RefAsst@2024!!'  },
+  { username: 'ref_head',       password: 'RefHead@2024!!'  },
+  { username: 'ref_assistant',  password: 'RefAsst@2024!!'  },
+  { username: 'fp_head',        password: 'FPHead@2024!!' },
+  { username: 'fp_assistant',   password: 'FPAsst@2024!!' },
+  { username: 'soap_head',      password: 'SoapHead@2024!!' },
+  { username: 'soap_assistant', password: 'SoapAsst@2024!!' },
 ];
 
 async function resetAllPasswords() {

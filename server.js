@@ -8,6 +8,7 @@ const sampleRoutes    = require('./src/routes/samples.routes');
 const resultRoutes    = require('./src/routes/results.routes');
 const dashboardRoutes = require('./src/routes/dashboard.routes');
 const lookupRoutes    = require('./src/routes/lookup.routes');
+const inventoryRoutes = require('./src/routes/inventory.routes');
 const { expireOldSessions } = require('./src/utils/sessionCleanup');
 
 const app  = express();
@@ -38,7 +39,7 @@ app.use('/api/samples',   sampleRoutes);
 app.use('/api/results',   resultRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/lookup',    lookupRoutes);
-
+app.use('/api/inventory', inventoryRoutes);
 // ── Health check ───────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
   res.json({
