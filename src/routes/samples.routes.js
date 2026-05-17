@@ -19,5 +19,8 @@ router.post('/bulk',         sc.registerBulkSamples);
 router.post('/assign-tests', sc.assignTests);
 router.get('/',              sc.getSamples);
 router.get('/:id',           sc.getSampleById);
+router.put('/:id',                        sc.updateSample);
+router.put('/:id/void',                   sc.voidSample);
+router.delete('/assignment/:assignmentId', sc.removeTestAssignment);
 
 module.exports = router;

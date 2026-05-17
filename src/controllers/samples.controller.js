@@ -319,3 +319,167 @@ exports.assignTests = async function(req, res) {
     return res.status(500).json({ error: 'Failed to assign tests' });
   }
 };
+
+// ============================================================
+// ADD THESE FUNCTIONS to backend/src/controllers/samples.controller.js
+// ============================================================
+
+// ── UPDATE SAMPLE DETAILS (correct a wrong registration) ──
+exports.updateSample = async function(req, res) {
+  try {
+    const { id } = req.params;
+    const {
+      sample_name,
+      sample_type_id,
+      brand_id,
+      subtype_id,
+      batch_number,
+      notes,
+      sampler_name,
+      correction_reason,
+    } = req.body;
+
+    // Fetch current sample for audit
+    const { data: current, error: fetchErr } = await supabase
+      .from('registered_samples')
+      .select('sample_name, sample_number, status')
+      .eq('id', id)
+      .single();
+
+    if (fetchErr || !current) {
+      return res.status(404).json({ error: 'Sample not found' });
+    }
+
+    // Build update payload
+    const updates = {};
+    if (sample_name)    updates.sample_name    = sample_name.trim();
+    if (sample_type_id) updates.sample_type_id = sample_type_id;
+    if (brand_id)       updates.brand_id       = brand_id;
+    if (subtype_id)     updates.subtype_id     = subtype_id;
+    if (batch_number !== undefined) updates.batch_number = batch_number;
+    if (notes       !== undefined) updates.notes        = notes;
+    if (sampler_name)   updates.sampler_name   = sampler_name;
+
+    const { data: updated, error: updateErr } = await supabase
+      .from('registered_samples')
+      .update(updates)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateErr) {
+      return res.status(400).json({ error: updateErr.message });
+    }
+
+    // Log to audit trail
+    try {
+      await supabase.from('sample_corrections').insert({
+        sample_id        : id,
+        sample_number    : current.sample_number,
+        old_sample_name  : current.sample_name,
+        new_sample_name  : sample_name || current.sample_name,
+        correction_reason: correction_reason || 'No reason given',
+        corrected_by     : req.user.id,
+        corrected_by_name: req.user.full_name || req.user.username,
+        corrected_at     : new Date().toISOString(),
+      });
+    } catch(e) {
+      // Audit table may not exist yet — continue
+      console.log('Audit log skipped:', e.message);
+    }
+
+    return res.json({
+      message: 'Sample updated successfully',
+      sample : updated,
+    });
+
+  } catch (err) {
+    console.error('updateSample error:', err.message);
+    return res.status(500).json({ error: 'Failed to update sample: ' + err.message });
+  }
+};
+
+// ── VOID A SAMPLE (mark as cancelled) ────────────────────
+exports.voidSample = async function(req, res) {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    const { data, error } = await supabase
+      .from('registered_samples')
+      .update({ status: 'voided', notes: `VOIDED: ${reason || 'No reason given'}` })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ message: 'Sample voided', sample: data });
+
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+// ── REMOVE A TEST ASSIGNMENT (before result is submitted) ─
+exports.removeTestAssignment = async function(req, res) {
+  try {
+    const { assignmentId } = req.params;
+
+    // Check it hasn't been submitted yet
+    const { data: existing } = await supabase
+      .from('sample_test_assignments')
+      .select('id, result_value, is_locked, sample_id')
+      .eq('id', assignmentId)
+      .single();
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Test assignment not found' });
+    }
+    if (existing.result_value) {
+      return res.status(400).json({
+        error: 'Cannot remove a test that already has a result submitted. Lock the result instead.',
+      });
+    }
+    if (existing.is_locked) {
+      return res.status(400).json({ error: 'This test is locked and cannot be removed' });
+    }
+
+    const { error } = await supabase
+      .from('sample_test_assignments')
+      .delete()
+      .eq('id', assignmentId);
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    // Check if sample still has assignments
+    const { data: remaining } = await supabase
+      .from('sample_test_assignments')
+      .select('id, result_value')
+      .eq('sample_id', existing.sample_id);
+
+    // If all remaining have results → mark complete
+    if (remaining?.length > 0 && remaining.every(a => a.result_value)) {
+      await supabase
+        .from('registered_samples')
+        .update({ status: 'complete' })
+        .eq('id', existing.sample_id);
+    }
+    // If no assignments left → back to pending
+    if (!remaining || remaining.length === 0) {
+      await supabase
+        .from('registered_samples')
+        .update({ status: 'pending' })
+        .eq('id', existing.sample_id);
+    }
+
+    return res.json({ message: 'Test removed successfully' });
+
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+// ── ADD TO samples.routes.js ──────────────────────────────
+// router.put('/:id',                     sc.updateSample);
+// router.put('/:id/void',                sc.voidSample);
+// router.delete('/assignment/:assignmentId', sc.removeTestAssignment);
