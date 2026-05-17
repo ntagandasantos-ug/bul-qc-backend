@@ -324,7 +324,14 @@ exports.assignTests = async function(req, res) {
 // ADD THESE FUNCTIONS to backend/src/controllers/samples.controller.js
 // ============================================================
 
-// ── UPDATE SAMPLE DETAILS (correct a wrong registration) ──
+// ============================================================
+// REPLACE the updateSample and add deleteSample functions
+// in backend/src/controllers/samples.controller.js
+// ============================================================
+
+'use strict';
+
+// ── UPDATE SAMPLE + REASSIGN TESTS IF TYPE CHANGED ────────
 exports.updateSample = async function(req, res) {
   try {
     const { id } = req.params;
@@ -339,10 +346,10 @@ exports.updateSample = async function(req, res) {
       correction_reason,
     } = req.body;
 
-    // Fetch current sample for audit
+    // Fetch current sample
     const { data: current, error: fetchErr } = await supabase
       .from('registered_samples')
-      .select('sample_name, sample_number, status')
+      .select('id, sample_name, sample_number, sample_type_id, status')
       .eq('id', id)
       .single();
 
@@ -350,15 +357,66 @@ exports.updateSample = async function(req, res) {
       return res.status(404).json({ error: 'Sample not found' });
     }
 
-    // Build update payload
+    const typeChanged = sample_type_id && sample_type_id !== current.sample_type_id;
+
+    // ── If sample type changed: reassign tests ─────────────
+    let reassignWarning = null;
+    if (typeChanged) {
+      // Check for submitted results on existing assignments
+      const { data: existing } = await supabase
+        .from('sample_test_assignments')
+        .select('id, result_value, tests(name)')
+        .eq('sample_id', id);
+
+      const withResults    = (existing || []).filter(a => a.result_value);
+      const withoutResults = (existing || []).filter(a => !a.result_value);
+
+      // Delete only assignments WITHOUT submitted results
+      if (withoutResults.length > 0) {
+        await supabase
+          .from('sample_test_assignments')
+          .delete()
+          .in('id', withoutResults.map(a => a.id));
+      }
+
+      // Get tests for the NEW sample type
+      const { data: newTests } = await supabase
+        .from('tests')
+        .select('id, name, code')
+        .eq('sample_type_id', sample_type_id)
+        .order('display_order', { ascending: true });
+
+      // Create new test assignments for new type
+      // (skip any test name that already has a result from the old type)
+      const submittedNames = new Set(withResults.map(a => a.tests?.name));
+      const toCreate = (newTests || []).filter(t => !submittedNames.has(t.name));
+
+      if (toCreate.length > 0) {
+        await supabase.from('sample_test_assignments').insert(
+          toCreate.map(t => ({
+            sample_id: id,
+            test_id  : t.id,
+          }))
+        );
+      }
+
+      if (withResults.length > 0) {
+        reassignWarning = `${withResults.length} test(s) with existing results were kept. ${toCreate.length} new test(s) added for ${sample_type_id}.`;
+      }
+    }
+
+    // ── Update the sample record ───────────────────────────
     const updates = {};
     if (sample_name)    updates.sample_name    = sample_name.trim();
     if (sample_type_id) updates.sample_type_id = sample_type_id;
-    if (brand_id)       updates.brand_id       = brand_id;
-    if (subtype_id)     updates.subtype_id     = subtype_id;
+    if (brand_id !== undefined) updates.brand_id  = brand_id  || null;
+    if (subtype_id !== undefined) updates.subtype_id = subtype_id || null;
     if (batch_number !== undefined) updates.batch_number = batch_number;
-    if (notes       !== undefined) updates.notes        = notes;
+    if (notes !== undefined)        updates.notes        = notes;
     if (sampler_name)   updates.sampler_name   = sampler_name;
+
+    // Reset status to in_progress if type changed and had no results
+    if (typeChanged) updates.status = 'in_progress';
 
     const { data: updated, error: updateErr } = await supabase
       .from('registered_samples')
@@ -371,26 +429,27 @@ exports.updateSample = async function(req, res) {
       return res.status(400).json({ error: updateErr.message });
     }
 
-    // Log to audit trail
+    // ── Log correction to audit table ─────────────────────
     try {
       await supabase.from('sample_corrections').insert({
         sample_id        : id,
         sample_number    : current.sample_number,
         old_sample_name  : current.sample_name,
         new_sample_name  : sample_name || current.sample_name,
-        correction_reason: correction_reason || 'No reason given',
+        correction_reason: `${correction_reason || 'No reason given'}${typeChanged ? ' [Sample type changed — tests reassigned]' : ''}`,
         corrected_by     : req.user.id,
         corrected_by_name: req.user.full_name || req.user.username,
         corrected_at     : new Date().toISOString(),
       });
     } catch(e) {
-      // Audit table may not exist yet — continue
       console.log('Audit log skipped:', e.message);
     }
 
     return res.json({
-      message: 'Sample updated successfully',
-      sample : updated,
+      message        : 'Sample updated successfully',
+      sample         : updated,
+      testsReassigned: typeChanged,
+      warning        : reassignWarning,
     });
 
   } catch (err) {
@@ -399,7 +458,8 @@ exports.updateSample = async function(req, res) {
   }
 };
 
-// ── VOID A SAMPLE (mark as cancelled) ────────────────────
+
+// ── VOID SAMPLE ────────────────────────────────────────────
 exports.voidSample = async function(req, res) {
   try {
     const { id } = req.params;
@@ -414,30 +474,75 @@ exports.voidSample = async function(req, res) {
 
     if (error) return res.status(400).json({ error: error.message });
     return res.json({ message: 'Sample voided', sample: data });
-
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
 };
 
-// ── REMOVE A TEST ASSIGNMENT (before result is submitted) ─
+
+// ── DELETE SAMPLE COMPLETELY ───────────────────────────────
+// Only allowed if NO test assignments have submitted results
+exports.deleteSample = async function(req, res) {
+  try {
+    const { id } = req.params;
+
+    // Check for submitted results
+    const { data: assignments } = await supabase
+      .from('sample_test_assignments')
+      .select('id, result_value, tests(name)')
+      .eq('sample_id', id);
+
+    const withResults = (assignments || []).filter(a => a.result_value);
+
+    if (withResults.length > 0) {
+      return res.status(400).json({
+        error: `Cannot delete: ${withResults.length} test result(s) already submitted (${withResults.map(a=>a.tests?.name).join(', ')}). Void the sample instead.`,
+      });
+    }
+
+    // Delete test assignments first
+    if (assignments && assignments.length > 0) {
+      await supabase
+        .from('sample_test_assignments')
+        .delete()
+        .eq('sample_id', id);
+    }
+
+    // Delete the sample
+    const { error: deleteErr } = await supabase
+      .from('registered_samples')
+      .delete()
+      .eq('id', id);
+
+    if (deleteErr) {
+      return res.status(400).json({ error: deleteErr.message });
+    }
+
+    return res.json({ message: 'Sample deleted successfully' });
+
+  } catch (err) {
+    console.error('deleteSample error:', err.message);
+    return res.status(500).json({ error: 'Failed to delete sample: ' + err.message });
+  }
+};
+
+
+// ── REMOVE A TEST ASSIGNMENT ───────────────────────────────
 exports.removeTestAssignment = async function(req, res) {
   try {
     const { assignmentId } = req.params;
 
-    // Check it hasn't been submitted yet
     const { data: existing } = await supabase
       .from('sample_test_assignments')
       .select('id, result_value, is_locked, sample_id')
       .eq('id', assignmentId)
       .single();
 
-    if (!existing) {
-      return res.status(404).json({ error: 'Test assignment not found' });
-    }
+    if (!existing) return res.status(404).json({ error: 'Test assignment not found' });
+
     if (existing.result_value) {
       return res.status(400).json({
-        error: 'Cannot remove a test that already has a result submitted. Lock the result instead.',
+        error: 'Cannot remove a test that already has a result submitted.',
       });
     }
     if (existing.is_locked) {
@@ -451,25 +556,16 @@ exports.removeTestAssignment = async function(req, res) {
 
     if (error) return res.status(400).json({ error: error.message });
 
-    // Check if sample still has assignments
     const { data: remaining } = await supabase
       .from('sample_test_assignments')
       .select('id, result_value')
       .eq('sample_id', existing.sample_id);
 
-    // If all remaining have results → mark complete
     if (remaining?.length > 0 && remaining.every(a => a.result_value)) {
-      await supabase
-        .from('registered_samples')
-        .update({ status: 'complete' })
-        .eq('id', existing.sample_id);
+      await supabase.from('registered_samples').update({ status:'complete' }).eq('id', existing.sample_id);
     }
-    // If no assignments left → back to pending
     if (!remaining || remaining.length === 0) {
-      await supabase
-        .from('registered_samples')
-        .update({ status: 'pending' })
-        .eq('id', existing.sample_id);
+      await supabase.from('registered_samples').update({ status:'pending' }).eq('id', existing.sample_id);
     }
 
     return res.json({ message: 'Test removed successfully' });
@@ -480,6 +576,7 @@ exports.removeTestAssignment = async function(req, res) {
 };
 
 // ── ADD TO samples.routes.js ──────────────────────────────
-// router.put('/:id',                     sc.updateSample);
-// router.put('/:id/void',                sc.voidSample);
-// router.delete('/assignment/:assignmentId', sc.removeTestAssignment);
+// router.put   ('/:id',                       sc.updateSample);
+// router.put   ('/:id/void',                  sc.voidSample);
+// router.delete('/:id',                       sc.deleteSample);
+// router.delete('/assignment/:assignmentId',  sc.removeTestAssignment);

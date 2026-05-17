@@ -22,5 +22,6 @@ router.get('/:id',           sc.getSampleById);
 router.put('/:id',                        sc.updateSample);
 router.put('/:id/void',                   sc.voidSample);
 router.delete('/assignment/:assignmentId', sc.removeTestAssignment);
+router.delete('/:id',                      sc.deleteSample);
 
 module.exports = router;
