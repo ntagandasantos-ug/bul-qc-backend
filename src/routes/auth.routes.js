@@ -13,4 +13,8 @@ router.get('/me',                   authenticate, auth.getMe);
 router.put('/change-password',      authenticate, auth.changePasswordWithCode);
 router.put('/change-username',      authenticate, auth.changeUsernameWithCode);
 
+router.get('/me', authenticate, (req, res) => {
+  return res.json({ user: req.user });
+});
+
 module.exports = router;
