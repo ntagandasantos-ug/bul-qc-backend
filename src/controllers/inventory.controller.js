@@ -192,30 +192,49 @@ exports.getItems = async (req, res) => {
 // ── ADD new item ──────────────────────────────────────────
 exports.addItem = async (req, res) => {
   try {
-    const payload = { ...req.body, created_by: req.user.id, updated_by: req.user.id };
+    // Remove quantity fields — they go to inventory_stock, not inventory_items
+    const {
+      qty_chemical_store,
+      qty_main_lab,
+      qty_det_lab,
+      ...itemData
+    } = req.body;
+
+    const payload = {
+      ...itemData,
+      created_by: req.user.id,
+      updated_by: req.user.id,
+    };
+
     const { data, error } = await supabase
       .from('inventory_items')
       .insert(payload)
       .select()
       .single();
-    if (error) return res.status(400).json({ error: error.message });
+
+    if (error) {
+      console.error('addItem error:', error.message);
+      return res.status(400).json({ error: error.message });
+    }
 
     // Notify QC Head
     await sendAlert(
       `New Inventory Item Added — ${data.item_name}`,
       buildTransactionEmail({
-        item_name       : data.item_name,
-        transaction_type: 'STOCK_IN',
-        quantity        : 0,
-        unit            : data.unit_of_measurement,
-        from_location   : null,
-        to_location     : 'CHEMICAL_STORE',
+        item_name        : data.item_name,
+        transaction_type : 'STOCK_IN',
+        quantity         : 0,
+        unit             : data.unit_of_measurement,
+        from_location    : null,
+        to_location      : 'CHEMICAL_STORE',
         performed_by_name: req.user.full_name || req.user.username,
-        notes           : 'New item added to inventory',
+        notes            : 'New item added to inventory',
       })
     );
+
     return res.json({ item: data });
   } catch(err) {
+    console.error('addItem crash:', err.message);
     return res.status(500).json({ error: err.message });
   }
 };
