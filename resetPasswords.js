@@ -24,6 +24,8 @@ const users = [
   { username: 'fp_assistant',   password: 'FPAsst@2024!!' },
   { username: 'soap_head',      password: 'SoapHead@2024!!' },
   { username: 'soap_assistant', password: 'SoapAsst@2024!!' },
+  { username: 'boiler_head',      password: 'BoilerHead@2024!!' },
+  { username: 'boiler_assistant', password: 'BoilerAsst@2024!!' },
 ];
 
 async function resetAllPasswords() {

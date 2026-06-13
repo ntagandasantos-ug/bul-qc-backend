@@ -1,6 +1,7 @@
 // ============================================================
 // FILE: backend/src/controllers/samples.controller.js
 // FIXES: duplicate sample number, bulk registration
+// Changes: added vehicle_number and container_number fields
 // ============================================================
 
 'use strict';
@@ -8,7 +9,6 @@
 const supabase = require('../config/supabase');
 
 // ── Helper: generate unique sample number ─────────────────
-// Uses MAX existing number + 1 to avoid duplicates
 async function generateSampleNumber(departmentId) {
   const { data: dept } = await supabase
     .from('departments')
@@ -20,7 +20,6 @@ async function generateSampleNumber(departmentId) {
   const code   = dept?.code || 'BUL';
   const prefix = `${code}-${year}-`;
 
-  // Find the highest existing sample number for this dept+year
   const { data: existing } = await supabase
     .from('registered_samples')
     .select('sample_number')
@@ -39,13 +38,20 @@ async function generateSampleNumber(departmentId) {
   return `${prefix}${String(nextNum).padStart(4, '0')}`;
 }
 
-// ── 1. REGISTER SINGLE SAMPLE ────────────────────────────
+// ── 1. REGISTER SINGLE SAMPLE ─────────────────────────────
 exports.registerSample = async function(req, res) {
   try {
     const {
-      sample_name, department_id, sample_type_id,
-      brand_id, subtype_id, batch_number,
-      notes, sampler_name,
+      sample_name,
+      department_id,
+      sample_type_id,
+      brand_id,
+      subtype_id,
+      vehicle_number,
+      container_number,
+      batch_number,
+      notes,
+      sampler_name,
     } = req.body;
 
     if (!sample_name)    return res.status(400).json({ error: 'Sample name is required' });
@@ -57,18 +63,20 @@ exports.registerSample = async function(req, res) {
     const { data: newSample, error } = await supabase
       .from('registered_samples')
       .insert({
-        sample_number  : sampleNumber,
-        sample_name    : sample_name.trim(),
+        sample_number   : sampleNumber,
+        sample_name     : sample_name.trim(),
         department_id,
         sample_type_id,
-        brand_id       : brand_id     || null,
-        subtype_id     : subtype_id   || null,
-        batch_number   : batch_number || null,
-        notes          : notes        || null,
-        sampler_name   : sampler_name || null,
-        registered_by  : req.user.id,
-        status         : 'pending',
-        registered_at  : new Date().toISOString(),
+        brand_id        : brand_id         || null,
+        subtype_id      : subtype_id       || null,
+        vehicle_number  : vehicle_number   || null,
+        container_number: container_number || null,
+        batch_number    : batch_number     || null,
+        notes           : notes            || null,
+        sampler_name    : sampler_name     || null,
+        registered_by   : req.user.id,
+        status          : 'pending',
+        registered_at   : new Date().toISOString(),
       })
       .select('id, sample_number, sample_name, status')
       .single();
@@ -89,8 +97,7 @@ exports.registerSample = async function(req, res) {
   }
 };
 
-// ── 2. BULK REGISTER SAMPLES ─────────────────────────────
-// Each sample gets a fresh number sequentially
+// ── 2. BULK REGISTER SAMPLES ──────────────────────────────
 exports.registerBulkSamples = async function(req, res) {
   try {
     const { samples } = req.body;
@@ -113,24 +120,25 @@ exports.registerBulkSamples = async function(req, res) {
         if (!s.sample_type_id) throw new Error('Sample type required');
         if (!s.sampler_name)   throw new Error('Sampler name required');
 
-        // Fresh number each iteration avoids duplicates
         const sampleNum = await generateSampleNumber(s.department_id);
 
         const { data: newSample, error: insertErr } = await supabase
           .from('registered_samples')
           .insert({
-            sample_number  : sampleNum,
-            sample_name    : s.sample_name.trim(),
-            department_id  : s.department_id,
-            sample_type_id : s.sample_type_id,
-            brand_id       : s.brand_id     || null,
-            subtype_id     : s.subtype_id   || null,
-            batch_number   : s.batch_number || null,
-            notes          : s.notes        || null,
-            sampler_name   : s.sampler_name.trim(),
-            registered_by  : req.user.id,
-            status         : 'pending',
-            registered_at  : new Date().toISOString(),
+            sample_number   : sampleNum,
+            sample_name     : s.sample_name.trim(),
+            department_id   : s.department_id,
+            sample_type_id  : s.sample_type_id,
+            brand_id        : s.brand_id         || null,
+            subtype_id      : s.subtype_id       || null,
+            vehicle_number  : s.vehicle_number   || null,
+            container_number: s.container_number || null,
+            batch_number    : s.batch_number     || null,
+            notes           : s.notes            || null,
+            sampler_name    : s.sampler_name.trim(),
+            registered_by   : req.user.id,
+            status          : 'pending',
+            registered_at   : new Date().toISOString(),
           })
           .select('id, sample_number, sample_name')
           .single();
@@ -183,7 +191,8 @@ exports.getSamples = async function(req, res) {
       .from('registered_samples')
       .select(`
         id, sample_number, sample_name, status,
-        registered_at, batch_number, notes, sampler_name,
+        registered_at, vehicle_number, container_number,
+        batch_number, notes, sampler_name,
         department_id,
         departments ( name, code ),
         sample_types (
@@ -200,18 +209,16 @@ exports.getSamples = async function(req, res) {
     if (status)        q = q.eq('status', status);
 
     if (fromDate && toDate) {
-  // Add 3-hour offset for EAT (UTC+3)
-  const start = new Date(fromDate + 'T00:00:00+03:00');
-  const end   = new Date(toDate   + 'T23:59:59+03:00');
-  q = q.gte('registered_at', start.toISOString())
-       .lte('registered_at', end.toISOString());
-} else if (date) {
-  // Add 3-hour offset for EAT (UTC+3)
-  const start = new Date(date + 'T00:00:00+03:00');
-  const end   = new Date(date + 'T23:59:59+03:00');
-  q = q.gte('registered_at', start.toISOString())
-       .lte('registered_at', end.toISOString());
-}
+      const start = new Date(fromDate + 'T00:00:00+03:00');
+      const end   = new Date(toDate   + 'T23:59:59+03:00');
+      q = q.gte('registered_at', start.toISOString())
+           .lte('registered_at', end.toISOString());
+    } else if (date) {
+      const start = new Date(date + 'T00:00:00+03:00');
+      const end   = new Date(date + 'T23:59:59+03:00');
+      q = q.gte('registered_at', start.toISOString())
+           .lte('registered_at', end.toISOString());
+    }
 
     const { data, error } = await q;
     if (error) {
@@ -235,7 +242,8 @@ exports.getSampleById = async function(req, res) {
       .from('registered_samples')
       .select(`
         id, sample_number, sample_name, status,
-        registered_at, batch_number, notes, sampler_name,
+        registered_at, vehicle_number, container_number,
+        batch_number, notes, sampler_name,
         department_id,
         departments ( name, code ),
         sample_types (
@@ -272,7 +280,7 @@ exports.getSampleById = async function(req, res) {
   }
 };
 
-// ── 5. ASSIGN TESTS TO SAMPLE ────────────────────────────
+// ── 5. ASSIGN TESTS TO SAMPLE ─────────────────────────────
 exports.assignTests = async function(req, res) {
   try {
     const { sample_id, test_ids } = req.body;
@@ -320,18 +328,7 @@ exports.assignTests = async function(req, res) {
   }
 };
 
-// ============================================================
-// ADD THESE FUNCTIONS to backend/src/controllers/samples.controller.js
-// ============================================================
-
-// ============================================================
-// REPLACE the updateSample and add deleteSample functions
-// in backend/src/controllers/samples.controller.js
-// ============================================================
-
-'use strict';
-
-// ── UPDATE SAMPLE + REASSIGN TESTS IF TYPE CHANGED ────────
+// ── 6. UPDATE SAMPLE + REASSIGN TESTS IF TYPE CHANGED ─────
 exports.updateSample = async function(req, res) {
   try {
     const { id } = req.params;
@@ -340,13 +337,14 @@ exports.updateSample = async function(req, res) {
       sample_type_id,
       brand_id,
       subtype_id,
+      vehicle_number,
+      container_number,
       batch_number,
       notes,
       sampler_name,
       correction_reason,
     } = req.body;
 
-    // Fetch current sample
     const { data: current, error: fetchErr } = await supabase
       .from('registered_samples')
       .select('id, sample_name, sample_number, sample_type_id, status')
@@ -359,10 +357,8 @@ exports.updateSample = async function(req, res) {
 
     const typeChanged = sample_type_id && sample_type_id !== current.sample_type_id;
 
-    // ── If sample type changed: reassign tests ─────────────
     let reassignWarning = null;
     if (typeChanged) {
-      // Check for submitted results on existing assignments
       const { data: existing } = await supabase
         .from('sample_test_assignments')
         .select('id, result_value, tests(name)')
@@ -371,7 +367,6 @@ exports.updateSample = async function(req, res) {
       const withResults    = (existing || []).filter(a => a.result_value);
       const withoutResults = (existing || []).filter(a => !a.result_value);
 
-      // Delete only assignments WITHOUT submitted results
       if (withoutResults.length > 0) {
         await supabase
           .from('sample_test_assignments')
@@ -379,43 +374,37 @@ exports.updateSample = async function(req, res) {
           .in('id', withoutResults.map(a => a.id));
       }
 
-      // Get tests for the NEW sample type
       const { data: newTests } = await supabase
         .from('tests')
         .select('id, name, code')
         .eq('sample_type_id', sample_type_id)
         .order('display_order', { ascending: true });
 
-      // Create new test assignments for new type
-      // (skip any test name that already has a result from the old type)
       const submittedNames = new Set(withResults.map(a => a.tests?.name));
       const toCreate = (newTests || []).filter(t => !submittedNames.has(t.name));
 
       if (toCreate.length > 0) {
         await supabase.from('sample_test_assignments').insert(
-          toCreate.map(t => ({
-            sample_id: id,
-            test_id  : t.id,
-          }))
+          toCreate.map(t => ({ sample_id: id, test_id: t.id }))
         );
       }
 
       if (withResults.length > 0) {
-        reassignWarning = `${withResults.length} test(s) with existing results were kept. ${toCreate.length} new test(s) added for ${sample_type_id}.`;
+        reassignWarning = `${withResults.length} test(s) with existing results were kept. ${toCreate.length} new test(s) added.`;
       }
     }
 
-    // ── Update the sample record ───────────────────────────
     const updates = {};
-    if (sample_name)    updates.sample_name    = sample_name.trim();
-    if (sample_type_id) updates.sample_type_id = sample_type_id;
-    if (brand_id !== undefined) updates.brand_id  = brand_id  || null;
-    if (subtype_id !== undefined) updates.subtype_id = subtype_id || null;
-    if (batch_number !== undefined) updates.batch_number = batch_number;
-    if (notes !== undefined)        updates.notes        = notes;
-    if (sampler_name)   updates.sampler_name   = sampler_name;
+    if (sample_name)               updates.sample_name    = sample_name.trim();
+    if (sample_type_id)            updates.sample_type_id = sample_type_id;
+    if (brand_id !== undefined)    updates.brand_id       = brand_id       || null;
+    if (subtype_id !== undefined)  updates.subtype_id     = subtype_id     || null;
+    if (vehicle_number   !== undefined) updates.vehicle_number   = vehicle_number   || null;
+    if (container_number !== undefined) updates.container_number = container_number || null;
+    if (batch_number !== undefined)     updates.batch_number     = batch_number     || null;
+    if (notes !== undefined)            updates.notes            = notes            || null;
+    if (sampler_name)              updates.sampler_name   = sampler_name;
 
-    // Reset status to in_progress if type changed and had no results
     if (typeChanged) updates.status = 'in_progress';
 
     const { data: updated, error: updateErr } = await supabase
@@ -429,7 +418,6 @@ exports.updateSample = async function(req, res) {
       return res.status(400).json({ error: updateErr.message });
     }
 
-    // ── Log correction to audit table ─────────────────────
     try {
       await supabase.from('sample_corrections').insert({
         sample_id        : id,
@@ -458,11 +446,10 @@ exports.updateSample = async function(req, res) {
   }
 };
 
-
-// ── VOID SAMPLE ────────────────────────────────────────────
+// ── 7. VOID SAMPLE ────────────────────────────────────────
 exports.voidSample = async function(req, res) {
   try {
-    const { id } = req.params;
+    const { id }     = req.params;
     const { reason } = req.body;
 
     const { data, error } = await supabase
@@ -479,14 +466,11 @@ exports.voidSample = async function(req, res) {
   }
 };
 
-
-// ── DELETE SAMPLE COMPLETELY ───────────────────────────────
-// Only allowed if NO test assignments have submitted results
+// ── 8. DELETE SAMPLE ──────────────────────────────────────
 exports.deleteSample = async function(req, res) {
   try {
     const { id } = req.params;
 
-    // Check for submitted results
     const { data: assignments } = await supabase
       .from('sample_test_assignments')
       .select('id, result_value, tests(name)')
@@ -500,7 +484,6 @@ exports.deleteSample = async function(req, res) {
       });
     }
 
-    // Delete test assignments first
     if (assignments && assignments.length > 0) {
       await supabase
         .from('sample_test_assignments')
@@ -508,7 +491,6 @@ exports.deleteSample = async function(req, res) {
         .eq('sample_id', id);
     }
 
-    // Delete the sample
     const { error: deleteErr } = await supabase
       .from('registered_samples')
       .delete()
@@ -526,8 +508,7 @@ exports.deleteSample = async function(req, res) {
   }
 };
 
-
-// ── REMOVE A TEST ASSIGNMENT ───────────────────────────────
+// ── 9. REMOVE A TEST ASSIGNMENT ───────────────────────────
 exports.removeTestAssignment = async function(req, res) {
   try {
     const { assignmentId } = req.params;
@@ -562,10 +543,12 @@ exports.removeTestAssignment = async function(req, res) {
       .eq('sample_id', existing.sample_id);
 
     if (remaining?.length > 0 && remaining.every(a => a.result_value)) {
-      await supabase.from('registered_samples').update({ status:'complete' }).eq('id', existing.sample_id);
+      await supabase.from('registered_samples')
+        .update({ status: 'complete' }).eq('id', existing.sample_id);
     }
     if (!remaining || remaining.length === 0) {
-      await supabase.from('registered_samples').update({ status:'pending' }).eq('id', existing.sample_id);
+      await supabase.from('registered_samples')
+        .update({ status: 'pending' }).eq('id', existing.sample_id);
     }
 
     return res.json({ message: 'Test removed successfully' });
@@ -575,8 +558,13 @@ exports.removeTestAssignment = async function(req, res) {
   }
 };
 
-// ── ADD TO samples.routes.js ──────────────────────────────
-// router.put   ('/:id',                       sc.updateSample);
-// router.put   ('/:id/void',                  sc.voidSample);
-// router.delete('/:id',                       sc.deleteSample);
-// router.delete('/assignment/:assignmentId',  sc.removeTestAssignment);
+// ── Routes reference ──────────────────────────────────────
+// POST   /api/samples                        → registerSample
+// POST   /api/samples/bulk                   → registerBulkSamples
+// GET    /api/samples                        → getSamples
+// GET    /api/samples/:id                    → getSampleById
+// POST   /api/samples/:id/assign-tests       → assignTests
+// PUT    /api/samples/:id                    → updateSample
+// PUT    /api/samples/:id/void               → voidSample
+// DELETE /api/samples/:id                    → deleteSample
+// DELETE /api/samples/assignment/:id         → removeTestAssignment
