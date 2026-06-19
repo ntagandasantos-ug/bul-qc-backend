@@ -1,601 +1,475 @@
 // ============================================================
 // FILE: backend/src/controllers/inventory.controller.js
-// Handles all inventory operations + email notifications
+// Matches REAL schema:
+//   inventory_items, inventory_categories, inventory_stock,
+//   inventory_requisitions + inventory_requisition_items,
+//   inventory_transfers, inventory_breakages,
+//   inventory_transactions
+// Locations: CHEMICAL_STORE, MAIN_LAB, DET_LAB
+// Reorder level checked against MAIN_LAB quantity
+// Low stock email fires after: requisition, transfer, usage
 // ============================================================
 
 'use strict';
 
-const supabase  = require('../config/supabase');
-const nodemailer = require('nodemailer');
+const supabase              = require('../config/supabase');
+const { sendLowStockAlert } = require('../services/inventoryEmail.service');
 
-// Email transporter (configure with your SMTP settings)
-const transporter = nodemailer.createTransport({
-  host   : process.env.SMTP_HOST || 'smtp.gmail.com',
-  port   : parseInt(process.env.SMTP_PORT || '587'),
-  secure : false,
-  auth   : {
-    user : process.env.SMTP_USER || process.env.GMAIL_USER,
-    pass : process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD,
-  },
-});
+// ── Fire-and-forget low stock email ───────────────────────
+function triggerLowStockEmail(triggerType, triggeredBy) {
+  sendLowStockAlert({ triggerType, triggeredBy })
+    .then(result => {
+      if (result.sent) console.log(`[Low Stock] Email sent after ${triggerType} by ${triggeredBy}`);
+    })
+    .catch(err => console.error('[Low Stock] Email error:', err.message));
+}
 
-const QC_EMAILS = [
-  process.env.QC_HEAD_EMAIL,
-  process.env.QC_ASST_EMAIL,
-].filter(Boolean);
+// ── Helper: get one inventory_stock row (item+location) ───
+async function getStockRow(itemId, location) {
+  const { data } = await supabase
+    .from('inventory_stock')
+    .select('*')
+    .eq('item_id', itemId)
+    .eq('location', location)
+    .maybeSingle();
+  return data;
+}
 
-// ── Send email alert helper ───────────────────────────────
-async function sendAlert(subject, htmlBody) {
-  if (!QC_EMAILS.length || !process.env.SMTP_USER) {
-    console.log('[Email] SMTP not configured — skipping:', subject);
-    return;
-  }
+// ── Helper: upsert a stock row's quantity/in_stock/in_use ─
+async function setStockRow(itemId, location, fields) {
+  const { error } = await supabase
+    .from('inventory_stock')
+    .upsert({
+      item_id : itemId,
+      location,
+      ...fields,
+      last_updated: new Date().toISOString(),
+    }, { onConflict: 'item_id,location' });
+  if (error) throw new Error(error.message);
+}
+
+// ════════════════════════════════════════════════════════════
+// CATEGORIES
+// ════════════════════════════════════════════════════════════
+exports.getCategories = async function(req, res) {
   try {
-    await transporter.sendMail({
-      from   : `"BUL QC LIMS" <${process.env.SMTP_USER}>`,
-      to     : QC_EMAILS.join(', '),
-      subject,
-      html   : htmlBody,
-    });
-    console.log('[Email] Sent:', subject);
-  } catch(e) {
-    console.error('[Email] Failed:', e.message);
-  }
-}
+    const { data, error } = await supabase
+      .from('inventory_categories')
+      .select('id, name, code, icon, description')
+      .order('name');
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ categories: data || [] });
+  } catch(err) { return res.status(500).json({ error: err.message }); }
+};
 
-// ── Build stock alert email HTML ─────────────────────────
-function buildReorderEmail(items) {
-  const rows = items.map(item => `
-    <tr>
-      <td style="padding:8px 12px;border-bottom:1px solid #EDE9FE;font-weight:600">${item.item_name}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #EDE9FE">${item.item_code||'—'}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #EDE9FE;text-align:center;color:#DC2626;font-weight:700">${item.chemical_store||0}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #EDE9FE;text-align:center">${item.main_lab||0}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #EDE9FE;text-align:center">${item.det_lab||0}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #EDE9FE;text-align:center;color:#EA580C;font-weight:700">${item.reorder_level}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #EDE9FE">${item.unit_of_measurement||'—'}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #EDE9FE">${item.country_of_origin||'—'}</td>
-    </tr>
-  `).join('');
-
-  return `
-    <div style="font-family:Arial,sans-serif;max-width:900px;margin:0 auto">
-      <div style="background:linear-gradient(135deg,#6B21A8,#7C3AED);padding:20px 28px;border-radius:12px 12px 0 0">
-        <h2 style="color:#fff;margin:0;font-size:20px">⚠️ BUL QC LIMS — Reorder Level Alert</h2>
-        <p style="color:#DDD6FE;margin:6px 0 0;font-size:13px">
-          The following items in the Chemical Store have reached or dropped below their reorder levels.<br>
-          <strong style="color:#FFB81C">Action required: Place procurement orders immediately.</strong>
-        </p>
-      </div>
-      <table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #EDE9FE">
-        <thead>
-          <tr style="background:#F5F3FF">
-            <th style="padding:10px 12px;text-align:left;font-size:12px;color:#6B21A8">Item Name</th>
-            <th style="padding:10px 12px;text-align:left;font-size:12px;color:#6B21A8">Code</th>
-            <th style="padding:10px 12px;text-align:center;font-size:12px;color:#6B21A8">Chemical Store</th>
-            <th style="padding:10px 12px;text-align:center;font-size:12px;color:#6B21A8">Main Lab</th>
-            <th style="padding:10px 12px;text-align:center;font-size:12px;color:#6B21A8">Detergent Lab</th>
-            <th style="padding:10px 12px;text-align:center;font-size:12px;color:#DC2626">Reorder Level</th>
-            <th style="padding:10px 12px;text-align:left;font-size:12px;color:#6B21A8">Unit</th>
-            <th style="padding:10px 12px;text-align:left;font-size:12px;color:#6B21A8">Origin</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
-      <div style="padding:14px 16px;background:#FFF7ED;border:1px solid #FED7AA;border-radius:0 0 12px 12px;font-size:12px;color:#92400E">
-        Generated by BUL QC LIMS on ${new Date().toLocaleString()} · Designed by SantosInfographics
-      </div>
-    </div>
-  `;
-}
-
-// ── Transaction alert email ───────────────────────────────
-function buildTransactionEmail(txn) {
-  const typeColors = {
-    STOCK_IN        : '#16A34A',
-    STOCK_OUT       : '#7C3AED',
-    REQUISITION     : '#0369A1',
-    TRANSFER        : '#EA580C',
-    BREAKAGE        : '#DC2626',
-    ADJUSTMENT      : '#6B7280',
-    EXPIRY_REMOVAL  : '#9333EA',
-  };
-  const color = typeColors[txn.transaction_type] || '#374151';
-  return `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-      <div style="background:linear-gradient(135deg,#6B21A8,#7C3AED);padding:18px 24px;border-radius:12px 12px 0 0">
-        <h2 style="color:#fff;margin:0;font-size:18px">📦 Inventory Transaction Alert</h2>
-        <p style="color:#DDD6FE;margin:4px 0 0;font-size:12px">BUL QC LIMS — ${new Date().toLocaleString()}</p>
-      </div>
-      <div style="padding:20px 24px;background:#fff;border:1px solid #EDE9FE">
-        <table style="width:100%;border-collapse:collapse">
-          ${[
-            ['Item',        txn.item_name],
-            ['Transaction', `<span style="color:${color};font-weight:700">${txn.transaction_type}</span>`],
-            ['Quantity',    `${txn.quantity} ${txn.unit||''}`],
-            ['From',        txn.from_location||'—'],
-            ['To',          txn.to_location||'—'],
-            ['Performed By',txn.performed_by_name||'—'],
-            ['Supervisor',  txn.supervisor_name||'—'],
-            ['Notes',       txn.notes||'—'],
-          ].map(([k,v]) => `
-            <tr>
-              <td style="padding:8px 12px;border-bottom:1px solid #F5F3FF;font-weight:700;color:#4C1D95;width:140px;font-size:13px">${k}</td>
-              <td style="padding:8px 12px;border-bottom:1px solid #F5F3FF;font-size:13px;color:#1F2937">${v}</td>
-            </tr>
-          `).join('')}
-        </table>
-      </div>
-      <div style="padding:12px 16px;background:#F5F3FF;border-radius:0 0 12px 12px;font-size:11px;color:#6B7280">
-        This is an automated notification from BUL QC LIMS. Do not reply to this email.
-      </div>
-    </div>
-  `;
-}
-
-// ══════════════════════════════════════════════════════════
-// CONTROLLER FUNCTIONS
-// ══════════════════════════════════════════════════════════
-
-// ── GET all items with stock ──────────────────────────────
-exports.getItems = async (req, res) => {
+// ════════════════════════════════════════════════════════════
+// ITEMS — reads from inventory_full_status view
+// (pivots inventory_stock across all 3 locations)
+// ════════════════════════════════════════════════════════════
+exports.getItems = async function(req, res) {
   try {
-    const { category, location, search, country, low_stock } = req.query;
+    const { category_id } = req.query;
 
-    let query = supabase
-      .from('inventory_items')
-      .select(`
-        id, item_name, item_code, unit_of_measurement,
-        country_of_origin, reorder_level, expiry_date,
-        comments, specifications, storage_conditions,
-        restrictions, usage_description, brand_name,
-        ph_range, capacity, type_or_brand, is_active,
-        created_at, updated_at,
-        inventory_categories ( id, name, code, icon ),
-        inventory_stock (
-          id, location, quantity, in_stock, in_use, last_updated
-        )
-      `)
-      .eq('is_active', true)
-      .order('item_name');
-
-    if (category) query = query.eq('inventory_categories.code', category);
-    if (search)   query = query.ilike('item_name', `%${search}%`);
-    if (country)  query = query.ilike('country_of_origin', `%${country}%`);
-
-    const { data, error } = await query;
+    let q = supabase.from('inventory_full_status').select('*').order('item_name');
+    const { data, error } = await q;
     if (error) return res.status(400).json({ error: error.message });
 
     let items = data || [];
-
-    // Filter by location if specified
-    if (location) {
-      items = items.filter(item =>
-        (item.inventory_stock||[]).some(s => s.location === location)
-      );
-    }
-
-    // Filter by low stock (chemical store below reorder level)
-    if (low_stock === 'true') {
-      items = items.filter(item => {
-        const storeStock = (item.inventory_stock||[]).find(s=>s.location==='CHEMICAL_STORE');
-        return storeStock && storeStock.quantity <= item.reorder_level;
-      });
+    if (category_id) {
+      // category_id filter requires join — fetch category name first
+      const { data: cat } = await supabase
+        .from('inventory_categories').select('name').eq('id', category_id).single();
+      if (cat) items = items.filter(i => i.category_name === cat.name);
     }
 
     return res.json({ items });
-  } catch(err) {
-    return res.status(500).json({ error: err.message });
-  }
+  } catch(err) { return res.status(500).json({ error: err.message }); }
 };
 
-// ── ADD new item ──────────────────────────────────────────
-exports.addItem = async (req, res) => {
+// ── ADD item (auto-creates 3 stock rows via DB trigger) ───
+exports.addItem = async function(req, res) {
   try {
-    // Remove quantity fields — they go to inventory_stock, not inventory_items
     const {
-      qty_chemical_store,
-      qty_main_lab,
-      qty_det_lab,
-      ...itemData
+      category_id, item_name, unit_of_measurement,
+      country_of_origin, reorder_level, expiry_date, comments,
+      specifications, storage_conditions, restrictions, usage_description,
+      brand_name, ph_range, capacity, type_or_brand,
+      initial_chemical_store_qty, initial_main_lab_qty, initial_det_lab_qty,
     } = req.body;
 
-    const payload = {
-      ...itemData,
-      created_by: req.user.id,
-      updated_by: req.user.id,
-    };
+    if (!item_name)   return res.status(400).json({ error: 'Item name is required' });
+    if (!category_id) return res.status(400).json({ error: 'Category is required' });
 
-    const { data, error } = await supabase
+    const { data: newItem, error } = await supabase
       .from('inventory_items')
-      .insert(payload)
+      .insert({
+        category_id,
+        item_name          : item_name.trim(),
+        unit_of_measurement: unit_of_measurement || null,
+        country_of_origin  : country_of_origin   || null,
+        reorder_level      : parseFloat(reorder_level || 0),
+        expiry_date        : expiry_date || null,
+        comments           : comments    || null,
+        specifications     : specifications     || null,
+        storage_conditions : storage_conditions || null,
+        restrictions       : restrictions       || null,
+        usage_description  : usage_description  || null,
+        brand_name         : brand_name || null,
+        ph_range           : ph_range   || null,
+        capacity           : capacity   || null,
+        type_or_brand      : type_or_brand || null,
+        created_by         : req.user?.id,
+        updated_by         : req.user?.id,
+      })
       .select()
       .single();
 
-    if (error) {
-      console.error('addItem error:', error.message);
-      return res.status(400).json({ error: error.message });
+    if (error) return res.status(400).json({ error: error.message });
+
+    // DB trigger trig_init_stock auto-creates 3 stock rows at 0.
+    // Apply any initial quantities supplied:
+    const initQty = [
+      ['CHEMICAL_STORE', initial_chemical_store_qty],
+      ['MAIN_LAB',        initial_main_lab_qty],
+      ['DET_LAB',         initial_det_lab_qty],
+    ];
+    for (const [loc, qty] of initQty) {
+      const q = parseFloat(qty || 0);
+      if (q > 0) {
+        await setStockRow(newItem.id, loc, { quantity:q, in_stock:q, in_use:0 });
+      }
     }
 
-    // Notify QC Head
-    await sendAlert(
-      `New Inventory Item Added — ${data.item_name}`,
-      buildTransactionEmail({
-        item_name        : data.item_name,
-        transaction_type : 'STOCK_IN',
-        quantity         : 0,
-        unit             : data.unit_of_measurement,
-        from_location    : null,
-        to_location      : 'CHEMICAL_STORE',
-        performed_by_name: req.user.full_name || req.user.username,
-        notes            : 'New item added to inventory',
-      })
-    );
-
-    return res.json({ item: data });
-  } catch(err) {
-    console.error('addItem crash:', err.message);
-    return res.status(500).json({ error: err.message });
-  }
+    return res.status(201).json({ message: 'Item added', item: newItem });
+  } catch(err) { return res.status(500).json({ error: err.message }); }
 };
 
-// ── UPDATE stock (STOCK_IN, STOCK_OUT, ADJUSTMENT) ────────
-exports.updateStock = async (req, res) => {
+// ── UPDATE item ───────────────────────────────────────────
+exports.updateItem = async function(req, res) {
   try {
-    const {
-      item_id, location, quantity, transaction_type,
-      to_location, notes, supervisor_name,
-    } = req.body;
+    const { id } = req.params;
+    const updates = {};
+    [
+      'item_name','unit_of_measurement','country_of_origin','reorder_level',
+      'expiry_date','comments','specifications','storage_conditions',
+      'restrictions','usage_description','brand_name','ph_range',
+      'capacity','type_or_brand','category_id',
+    ].forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+    updates.updated_by = req.user?.id;
+    updates.updated_at = new Date().toISOString();
 
-    if (!item_id || !location || !quantity || !transaction_type) {
-      return res.status(400).json({ error: 'Missing required fields' });
+    const { data, error } = await supabase
+      .from('inventory_items').update(updates).eq('id', id).select().single();
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ message: 'Item updated', item: data });
+  } catch(err) { return res.status(500).json({ error: err.message }); }
+};
+
+// ════════════════════════════════════════════════════════════
+// REQUISITIONS — Chemical Store → requesting lab
+// Auto-fulfilled in one step; moves stock + triggers email
+// ════════════════════════════════════════════════════════════
+exports.createRequisition = async function(req, res) {
+  try {
+    const { requesting_lab, items, notes } = req.body;
+    // items: [{ item_id, quantity_requested }]
+
+    if (!requesting_lab || !['MAIN_LAB','DET_LAB'].includes(requesting_lab)) {
+      return res.status(400).json({ error: 'requesting_lab must be MAIN_LAB or DET_LAB' });
+    }
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'At least one item is required' });
     }
 
-    // Get item details
-    const { data: item } = await supabase
-      .from('inventory_items')
-      .select('item_name, unit_of_measurement, reorder_level, item_code')
-      .eq('id', item_id)
+    // Validate stock availability for every item first
+    for (const it of items) {
+      const store = await getStockRow(it.item_id, 'CHEMICAL_STORE');
+      const avail = parseFloat(store?.quantity || 0);
+      if (avail < parseFloat(it.quantity_requested)) {
+        const { data: itemInfo } = await supabase.from('inventory_items').select('item_name').eq('id', it.item_id).single();
+        return res.status(400).json({ error: `Insufficient stock for "${itemInfo?.item_name||it.item_id}" in Chemical Store. Available: ${avail}` });
+      }
+    }
+
+    // Create the requisition (auto-fulfilled)
+    const { data: requisition, error: reqErr } = await supabase
+      .from('inventory_requisitions')
+      .insert({
+        requesting_lab,
+        requested_by      : req.user?.id,
+        requested_by_name : req.user?.full_name,
+        status             : 'fulfilled',
+        approved_by        : req.user?.id,
+        fulfilled_at       : new Date().toISOString(),
+        notes              : notes || null,
+      })
+      .select()
       .single();
 
-    // Get current stock
-    const { data: stock } = await supabase
-      .from('inventory_stock')
-      .select('*')
-      .eq('item_id', item_id)
-      .eq('location', location)
-      .single();
+    if (reqErr) return res.status(400).json({ error: reqErr.message });
 
-    const currentQty = stock?.quantity || 0;
-    let newQty = currentQty;
+    // Process each item: move stock + log requisition_items + transaction
+    for (const it of items) {
+      const qty = parseFloat(it.quantity_requested);
 
-    if (transaction_type === 'STOCK_IN')    newQty = currentQty + parseFloat(quantity);
-    if (transaction_type === 'STOCK_OUT')   newQty = Math.max(0, currentQty - parseFloat(quantity));
-    if (transaction_type === 'ADJUSTMENT')  newQty = parseFloat(quantity);
+      const { data: itemInfo } = await supabase
+        .from('inventory_items').select('item_name, unit_of_measurement').eq('id', it.item_id).single();
 
-    // Update stock
-    await supabase.from('inventory_stock')
-      .upsert({
-        item_id,
-        location,
-        quantity    : newQty,
-        in_stock    : newQty,
-        last_updated: new Date().toISOString(),
-        updated_by  : req.user.id,
-      }, { onConflict: 'item_id,location' });
+      const store   = await getStockRow(it.item_id, 'CHEMICAL_STORE');
+      const destLab = await getStockRow(it.item_id, requesting_lab);
 
-    // Record transaction
-    await supabase.from('inventory_transactions').insert({
-      item_id,
-      item_name        : item?.item_name,
-      transaction_type,
-      from_location    : transaction_type === 'STOCK_OUT' ? location : null,
-      to_location      : transaction_type === 'STOCK_IN'  ? location : to_location,
-      quantity         : parseFloat(quantity),
-      unit             : item?.unit_of_measurement,
-      balance_after    : newQty,
-      performed_by     : req.user.id,
-      performed_by_name: req.user.full_name || req.user.username,
-      supervisor_name,
-      notes,
-    });
+      const newStoreQty = Math.max(parseFloat(store?.quantity||0) - qty, 0);
+      const newDestQty  = parseFloat(destLab?.quantity||0) + qty;
 
-    // Send email notification
-    await sendAlert(
-      `Inventory Update — ${item?.item_name} (${transaction_type})`,
-      buildTransactionEmail({
-        item_name        : item?.item_name,
-        transaction_type,
-        quantity,
-        unit             : item?.unit_of_measurement,
-        from_location    : location,
-        to_location,
-        performed_by_name: req.user.full_name || req.user.username,
-        supervisor_name,
-        notes,
-      })
-    );
+      await setStockRow(it.item_id, 'CHEMICAL_STORE', {
+        quantity: newStoreQty, in_stock: newStoreQty, in_use: store?.in_use||0,
+      });
+      await setStockRow(it.item_id, requesting_lab, {
+        quantity: newDestQty, in_stock: (parseFloat(destLab?.in_stock||0)+qty), in_use: destLab?.in_use||0,
+      });
 
-    // Check if stock dropped below reorder level
-    if (transaction_type === 'STOCK_OUT' && location === 'CHEMICAL_STORE' && newQty <= item?.reorder_level) {
-      await sendAlert(
-        `⚠️ REORDER ALERT — ${item?.item_name} below reorder level`,
-        buildReorderEmail([{
-          item_name          : item?.item_name,
-          item_code          : item?.item_code,
-          chemical_store     : newQty,
-          main_lab           : '—',
-          det_lab            : '—',
-          reorder_level      : item?.reorder_level,
-          unit_of_measurement: item?.unit_of_measurement,
-          country_of_origin  : '',
-        }])
-      );
-    }
-
-    return res.json({ success: true, new_quantity: newQty });
-  } catch(err) {
-    return res.status(500).json({ error: err.message });
-  }
-};
-
-// ── UPDATE in_use / in_stock (Glassware/Utils/Logbooks) ───
-exports.updateInUse = async (req, res) => {
-  try {
-    const { item_id, location, in_use, in_stock, notes } = req.body;
-
-    await supabase.from('inventory_stock')
-      .upsert({
-        item_id, location,
-        in_use   : parseFloat(in_use  || 0),
-        in_stock : parseFloat(in_stock || 0),
-        quantity : parseFloat(in_use||0) + parseFloat(in_stock||0),
-        last_updated: new Date().toISOString(),
-        updated_by  : req.user.id,
-      }, { onConflict: 'item_id,location' });
-
-    const { data: item } = await supabase.from('inventory_items').select('item_name,unit_of_measurement').eq('id',item_id).single();
-
-    await supabase.from('inventory_transactions').insert({
-      item_id, item_name: item?.item_name,
-      transaction_type : 'ADJUSTMENT',
-      from_location    : location,
-      to_location      : location,
-      quantity         : parseFloat(in_use||0),
-      unit             : item?.unit_of_measurement,
-      performed_by     : req.user.id,
-      performed_by_name: req.user.full_name || req.user.username,
-      notes            : notes || `In-use updated to ${in_use}, In-stock: ${in_stock}`,
-    });
-
-    await sendAlert(
-      `Stock Update — ${item?.item_name} [${location}]`,
-      buildTransactionEmail({
-        item_name        : item?.item_name,
-        transaction_type : 'ADJUSTMENT',
-        quantity         : in_use,
-        unit             : item?.unit_of_measurement,
-        from_location    : location,
-        to_location      : location,
-        performed_by_name: req.user.full_name || req.user.username,
-        notes            : `In-use: ${in_use}, In-stock: ${in_stock}`,
-      })
-    );
-
-    return res.json({ success: true });
-  } catch(err) {
-    return res.status(500).json({ error: err.message });
-  }
-};
-
-// ── RECORD BREAKAGE ───────────────────────────────────────
-exports.recordBreakage = async (req, res) => {
-  try {
-    const {
-      item_id, item_name, quantity_broken, unit,
-      location, broken_by_name, supervisor_name,
-      circumstances, shift,
-    } = req.body;
-
-    // Record breakage
-    const { data: brk } = await supabase.from('inventory_breakages').insert({
-      item_id, item_name, quantity_broken, unit, location,
-      broken_by      : req.user.id,
-      broken_by_name,
-      supervisor_name,
-      circumstances,
-      shift,
-      breakage_date  : new Date().toISOString(),
-    }).select().single();
-
-    // Reduce stock at location
-    if (item_id && quantity_broken > 0) {
-      const { data: stock } = await supabase
-        .from('inventory_stock').select('quantity,in_stock,in_use').eq('item_id',item_id).eq('location',location).single();
-      const newQty = Math.max(0, (stock?.quantity||0) - parseFloat(quantity_broken));
-      await supabase.from('inventory_stock').update({
-        quantity   : newQty,
-        in_stock   : Math.max(0, (stock?.in_stock||0) - parseFloat(quantity_broken)),
-        last_updated: new Date().toISOString(),
-        updated_by  : req.user.id,
-      }).eq('item_id',item_id).eq('location',location);
+      await supabase.from('inventory_requisition_items').insert({
+        requisition_id     : requisition.id,
+        item_id             : it.item_id,
+        item_name           : itemInfo?.item_name,
+        quantity_requested  : qty,
+        quantity_issued      : qty,
+        unit                 : itemInfo?.unit_of_measurement,
+      });
 
       await supabase.from('inventory_transactions').insert({
-        item_id, item_name, transaction_type: 'BREAKAGE',
-        from_location: location, quantity: quantity_broken, unit,
-        balance_after: newQty,
-        performed_by : req.user.id, performed_by_name: broken_by_name,
-        supervisor_name, notes: circumstances,
+        item_id          : it.item_id,
+        item_name         : itemInfo?.item_name,
+        transaction_type  : 'REQUISITION',
+        from_location      : 'CHEMICAL_STORE',
+        to_location        : requesting_lab,
+        quantity           : qty,
+        unit                : itemInfo?.unit_of_measurement,
+        balance_after       : newDestQty,
+        performed_by        : req.user?.id,
+        performed_by_name   : req.user?.full_name,
+        reference_no         : requisition.requisition_no,
+        notes                : notes || null,
       });
     }
 
-    // EMAIL ALERT for breakage
-    await sendAlert(
-      `🚨 BREAKAGE REPORT — ${item_name} [${location}]`,
-      `
-      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-        <div style="background:#DC2626;padding:18px 24px;border-radius:12px 12px 0 0">
-          <h2 style="color:#fff;margin:0">🚨 Item Breakage Report</h2>
-          <p style="color:#FCA5A5;margin:4px 0 0;font-size:12px">${new Date().toLocaleString()}</p>
-        </div>
-        <div style="padding:20px 24px;background:#fff;border:1px solid #FECACA">
-          <table style="width:100%;border-collapse:collapse">
-            ${[
-              ['Item',           item_name],
-              ['Quantity Broken', `${quantity_broken} ${unit||''}`],
-              ['Location',       location.replace('_',' ')],
-              ['Broken By',      broken_by_name],
-              ['Shift Supervisor', supervisor_name||'—'],
-              ['Shift',          shift||'—'],
-              ['Circumstances',  circumstances||'—'],
-            ].map(([k,v])=>`<tr><td style="padding:8px;font-weight:700;color:#991B1B;width:160px">${k}</td><td style="padding:8px;color:#1F2937">${v}</td></tr>`).join('')}
-          </table>
-        </div>
-        <div style="padding:10px 16px;background:#FEF2F2;font-size:11px;color:#6B7280;border-radius:0 0 12px 12px">
-          Automated alert from BUL QC LIMS · Designed by SantosInfographics
-        </div>
-      </div>
-      `
-    );
+    // ── Trigger low stock email ────────────────────────────
+    triggerLowStockEmail('requisition', req.user?.full_name || 'System');
 
-    return res.json({ breakage: brk });
-  } catch(err) {
-    return res.status(500).json({ error: err.message });
-  }
+    return res.status(201).json({
+      message     : `Requisition ${requisition.requisition_no} fulfilled — ${items.length} item(s) moved to ${requesting_lab}`,
+      requisition,
+    });
+  } catch(err) { return res.status(500).json({ error: err.message }); }
 };
 
-// ── CREATE REQUISITION ────────────────────────────────────
-exports.createRequisition = async (req, res) => {
+// ════════════════════════════════════════════════════════════
+// LAB-TO-LAB TRANSFER (MAIN_LAB ↔ DET_LAB)
+// ════════════════════════════════════════════════════════════
+exports.createTransfer = async function(req, res) {
   try {
-    const { requesting_lab, items, notes } = req.body;
+    const { item_id, quantity, from_lab, to_lab, notes } = req.body;
 
-    const { data: req_ } = await supabase.from('inventory_requisitions').insert({
-      requesting_lab,
-      requested_by     : req.user.id,
-      requested_by_name: req.user.full_name || req.user.username,
-      notes,
-    }).select().single();
+    if (!item_id)  return res.status(400).json({ error: 'Item is required' });
+    if (!quantity) return res.status(400).json({ error: 'Quantity is required' });
+    if (!['MAIN_LAB','DET_LAB'].includes(from_lab) || !['MAIN_LAB','DET_LAB'].includes(to_lab)) {
+      return res.status(400).json({ error: 'from_lab and to_lab must be MAIN_LAB or DET_LAB' });
+    }
+    if (from_lab === to_lab) return res.status(400).json({ error: 'from_lab and to_lab cannot be the same' });
 
-    const reqItems = items.map(i => ({
-      requisition_id    : req_.id,
-      item_id           : i.item_id,
-      item_name         : i.item_name,
-      quantity_requested: i.quantity,
-      unit              : i.unit,
-    }));
-    await supabase.from('inventory_requisition_items').insert(reqItems);
+    const qty = parseFloat(quantity);
+    if (qty <= 0) return res.status(400).json({ error: 'Quantity must be greater than 0' });
 
-    await sendAlert(
-      `New Requisition ${req_.requisition_no} from ${requesting_lab.replace('_',' ')}`,
-      buildTransactionEmail({
-        item_name        : `${items.length} item(s) requested`,
-        transaction_type : 'REQUISITION',
-        quantity         : items.length,
-        unit             : 'items',
-        from_location    : 'CHEMICAL_STORE',
-        to_location      : requesting_lab,
-        performed_by_name: req.user.full_name || req.user.username,
-        notes,
+    const { data: itemInfo } = await supabase
+      .from('inventory_items').select('item_name, unit_of_measurement').eq('id', item_id).single();
+    if (!itemInfo) return res.status(404).json({ error: 'Item not found' });
+
+    const source = await getStockRow(item_id, from_lab);
+    const sourceQty = parseFloat(source?.quantity || 0);
+    if (sourceQty < qty) {
+      return res.status(400).json({ error: `Insufficient stock in ${from_lab}. Available: ${sourceQty}` });
+    }
+
+    const dest = await getStockRow(item_id, to_lab);
+    const newSourceQty = Math.max(sourceQty - qty, 0);
+    const newDestQty   = parseFloat(dest?.quantity || 0) + qty;
+
+    await setStockRow(item_id, from_lab, {
+      quantity:newSourceQty, in_stock:Math.max(parseFloat(source?.in_stock||0)-qty,0), in_use:source?.in_use||0,
+    });
+    await setStockRow(item_id, to_lab, {
+      quantity:newDestQty, in_stock:parseFloat(dest?.in_stock||0)+qty, in_use:dest?.in_use||0,
+    });
+
+    const { data: transfer, error: trErr } = await supabase
+      .from('inventory_transfers')
+      .insert({
+        item_id, item_name:itemInfo.item_name,
+        from_lab, to_lab, quantity:qty, unit:itemInfo.unit_of_measurement,
+        requested_by:req.user?.id, requested_by_name:req.user?.full_name,
+        approved_by:req.user?.id, status:'completed',
+        notes:notes||null, completed_at:new Date().toISOString(),
       })
-    );
+      .select().single();
+    if (trErr) return res.status(400).json({ error: trErr.message });
 
-    return res.json({ requisition: req_ });
-  } catch(err) {
-    return res.status(500).json({ error: err.message });
-  }
+    await supabase.from('inventory_transactions').insert({
+      item_id, item_name:itemInfo.item_name,
+      transaction_type:'TRANSFER',
+      from_location:from_lab, to_location:to_lab,
+      quantity:qty, unit:itemInfo.unit_of_measurement,
+      balance_after:newDestQty,
+      performed_by:req.user?.id, performed_by_name:req.user?.full_name,
+      reference_no:transfer.transfer_no, notes:notes||null,
+    });
+
+    // ── Trigger low stock email ────────────────────────────
+    triggerLowStockEmail('transfer', req.user?.full_name || 'System');
+
+    return res.status(201).json({
+      message: `${qty} ${itemInfo.unit_of_measurement||''} of ${itemInfo.item_name} transferred from ${from_lab} to ${to_lab}`,
+      transfer,
+    });
+  } catch(err) { return res.status(500).json({ error: err.message }); }
 };
 
-// ── GET TRANSACTIONS (audit trail) ───────────────────────
-exports.getTransactions = async (req, res) => {
+// ════════════════════════════════════════════════════════════
+// USAGE — consume (permanently used) or check_out/return
+// (move between in_stock and in_use within same location)
+// ════════════════════════════════════════════════════════════
+exports.recordUsage = async function(req, res) {
   try {
-    const { item_id, type, from_date, to_date, limit = 50 } = req.query;
-    let query = supabase
+    const { item_id, location, action, quantity, purpose, used_by } = req.body;
+    // action: 'consume' | 'check_out' | 'return'
+
+    if (!item_id)  return res.status(400).json({ error: 'Item is required' });
+    if (!['MAIN_LAB','DET_LAB'].includes(location)) {
+      return res.status(400).json({ error: 'location must be MAIN_LAB or DET_LAB' });
+    }
+    if (!['consume','check_out','return'].includes(action)) {
+      return res.status(400).json({ error: 'action must be consume, check_out or return' });
+    }
+
+    const qty = parseFloat(quantity);
+    if (qty <= 0) return res.status(400).json({ error: 'Quantity must be greater than 0' });
+
+    const { data: itemInfo } = await supabase
+      .from('inventory_items').select('item_name, unit_of_measurement').eq('id', item_id).single();
+    if (!itemInfo) return res.status(404).json({ error: 'Item not found' });
+
+    const stock = await getStockRow(item_id, location);
+    const curQty    = parseFloat(stock?.quantity || 0);
+    const curStock  = parseFloat(stock?.in_stock || 0);
+    const curInUse  = parseFloat(stock?.in_use   || 0);
+
+    let newQty = curQty, newStock = curStock, newInUse = curInUse;
+    let txnType = 'STOCK_OUT';
+    let notes   = `${purpose || 'Lab usage'} — By: ${used_by || req.user?.full_name}`;
+
+    if (action === 'consume') {
+      if (curStock < qty) return res.status(400).json({ error: `Insufficient stock in ${location}. In stock: ${curStock}` });
+      newQty   = Math.max(curQty - qty, 0);
+      newStock = Math.max(curStock - qty, 0);
+      txnType  = 'STOCK_OUT';
+    } else if (action === 'check_out') {
+      if (curStock < qty) return res.status(400).json({ error: `Insufficient available stock in ${location}. In stock: ${curStock}` });
+      newStock = Math.max(curStock - qty, 0);
+      newInUse = curInUse + qty;
+      txnType  = 'STOCK_OUT';
+    } else if (action === 'return') {
+      if (curInUse < qty) return res.status(400).json({ error: `Cannot return more than is in use. In use: ${curInUse}` });
+      newStock = curStock + qty;
+      newInUse = Math.max(curInUse - qty, 0);
+      txnType  = 'ADJUSTMENT';
+      notes    = `Returned to stock — By: ${used_by || req.user?.full_name}`;
+    }
+
+    await setStockRow(item_id, location, { quantity:newQty, in_stock:newStock, in_use:newInUse });
+
+    await supabase.from('inventory_transactions').insert({
+      item_id, item_name:itemInfo.item_name,
+      transaction_type: txnType,
+      from_location: location, to_location: action==='return'?null:location,
+      quantity: qty, unit: itemInfo.unit_of_measurement,
+      balance_after: newQty,
+      performed_by: req.user?.id, performed_by_name: req.user?.full_name,
+      notes,
+    });
+
+    // ── Trigger low stock email ────────────────────────────
+    triggerLowStockEmail('usage', used_by || req.user?.full_name || 'System');
+
+    return res.status(201).json({
+      message  : `Usage recorded for ${itemInfo.item_name} (${action})`,
+      location, new_quantity: newQty, new_in_stock: newStock, new_in_use: newInUse,
+    });
+  } catch(err) { return res.status(500).json({ error: err.message }); }
+};
+
+// ── GET transactions log ──────────────────────────────────
+exports.getTransactions = async function(req, res) {
+  try {
+    const { item_id, type, limit = 100 } = req.query;
+    let q = supabase
       .from('inventory_transactions')
       .select('*')
       .order('transaction_date', { ascending: false })
       .limit(parseInt(limit));
-    if (item_id)   query = query.eq('item_id', item_id);
-    if (type)      query = query.eq('transaction_type', type);
-    if (from_date) query = query.gte('transaction_date', from_date + 'T00:00:00+03:00');
-    if (to_date)   query = query.lte('transaction_date', to_date   + 'T23:59:59+03:00');
-    const { data, error } = await query;
+    if (item_id) q = q.eq('item_id', item_id);
+    if (type)    q = q.eq('transaction_type', type);
+    const { data, error } = await q;
     if (error) return res.status(400).json({ error: error.message });
     return res.json({ transactions: data || [] });
-  } catch(err) {
-    return res.status(500).json({ error: err.message });
-  }
+  } catch(err) { return res.status(500).json({ error: err.message }); }
 };
 
-// ── GET BREAKAGES ─────────────────────────────────────────
-exports.getBreakages = async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('inventory_breakages')
-      .select('*')
-      .order('breakage_date', { ascending: false })
-      .limit(100);
-    if (error) return res.status(400).json({ error: error.message });
-    return res.json({ breakages: data || [] });
-  } catch(err) {
-    return res.status(500).json({ error: err.message });
-  }
-};
-
-// ── GET REQUISITIONS ──────────────────────────────────────
-exports.getRequisitions = async (req, res) => {
+// ── GET requisitions ───────────────────────────────────────
+exports.getRequisitions = async function(req, res) {
   try {
     const { data, error } = await supabase
       .from('inventory_requisitions')
       .select(`*, inventory_requisition_items(*)`)
       .order('created_at', { ascending: false })
-      .limit(50);
+      .limit(100);
     if (error) return res.status(400).json({ error: error.message });
     return res.json({ requisitions: data || [] });
-  } catch(err) {
-    return res.status(500).json({ error: err.message });
-  }
+  } catch(err) { return res.status(500).json({ error: err.message }); }
 };
 
-// ── WEEKLY REORDER CHECK (called by cron job) ─────────────
-exports.weeklyReorderCheck = async (req, res) => {
+// ── GET transfers ──────────────────────────────────────────
+exports.getTransfers = async function(req, res) {
   try {
-    const { data: items, error } = await supabase
-      .from('inventory_items')
-      .select(`
-        item_name, item_code, reorder_level,
-        unit_of_measurement, country_of_origin,
-        inventory_stock ( location, quantity )
-      `)
-      .eq('is_active', true);
-
+    const { data, error } = await supabase
+      .from('inventory_transfers')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(100);
     if (error) return res.status(400).json({ error: error.message });
-
-    // Find items where chemical store qty <= reorder level
-    const belowReorder = (items||[])
-      .map(item => {
-        const stock = {};
-        (item.inventory_stock||[]).forEach(s => { stock[s.location] = s.quantity; });
-        return {
-          ...item,
-          chemical_store: stock['CHEMICAL_STORE'] || 0,
-          main_lab      : stock['MAIN_LAB']        || 0,
-          det_lab       : stock['DET_LAB']         || 0,
-        };
-      })
-      .filter(item => item.chemical_store <= item.reorder_level);
-
-    if (belowReorder.length > 0) {
-      await sendAlert(
-        `⚠️ Weekly Reorder Alert — ${belowReorder.length} item(s) need restocking`,
-        buildReorderEmail(belowReorder)
-      );
-    }
-
-    return res.json({
-      checked: items?.length || 0,
-      alerts : belowReorder.length,
-    });
-  } catch(err) {
-    return res.status(500).json({ error: err.message });
-  }
+    return res.json({ transfers: data || [] });
+  } catch(err) { return res.status(500).json({ error: err.message }); }
 };
+
+// ── GET low stock items (Main Lab) ─────────────────────────
+exports.getLowStockItems = async function(req, res) {
+  try {
+    const { data, error } = await supabase
+      .from('inventory_low_stock')
+      .select('*')
+      .order('item_name');
+    if (error) return res.status(400).json({ error: error.message });
+    return res.json({ lowItems: data || [], count: (data||[]).length });
+  } catch(err) { return res.status(500).json({ error: err.message }); }
+};
+
+// ── Routes reference ───────────────────────────────────────
+// GET    /api/inventory/categories        → getCategories
+// GET    /api/inventory/items              → getItems
+// POST   /api/inventory/items              → addItem
+// PUT    /api/inventory/items/:id          → updateItem
+// GET    /api/inventory/transactions       → getTransactions
+// GET    /api/inventory/requisitions       → getRequisitions
+// POST   /api/inventory/requisitions       → createRequisition ← triggers email
+// GET    /api/inventory/transfers          → getTransfers
+// POST   /api/inventory/transfers          → createTransfer    ← triggers email
+// POST   /api/inventory/usage              → recordUsage       ← triggers email
+// GET    /api/inventory/low-stock          → getLowStockItems
