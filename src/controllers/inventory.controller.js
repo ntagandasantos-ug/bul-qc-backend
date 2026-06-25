@@ -100,6 +100,18 @@ exports.addItem = async function(req, res) {
     if (!item_name)   return res.status(400).json({ error: 'Item name is required' });
     if (!category_id) return res.status(400).json({ error: 'Category is required' });
 
+    // Check for existing item with the same name (case-insensitive)
+    const { data: existing } = await supabase
+      .from('inventory_items')
+      .select('id, item_name')
+      .ilike('item_name', item_name.trim())
+      .eq('is_active', true)
+      .maybeSingle();
+
+    if (existing) {
+      return res.status(409).json({ error: `An item named "${existing.item_name}" already exists. Please use a different name or edit the existing item.` });
+    }
+
     const { data: newItem, error } = await supabase
       .from('inventory_items')
       .insert({
