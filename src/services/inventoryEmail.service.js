@@ -315,7 +315,7 @@ async function sendLowStockAlert({ triggerType, triggeredBy }) {
 
     const { data, error } = await resend.emails.send({
       from   : 'BUL QC LIMS <onboarding@resend.dev>',
-      to     : recipients.map(r => r.email),
+      to     : ['ntagandasantos@gmail.com'],
       subject,
       html,
     });
