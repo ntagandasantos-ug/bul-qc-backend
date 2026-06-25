@@ -4,24 +4,16 @@
 // (locations: CHEMICAL_STORE, MAIN_LAB, DET_LAB)
 // Reorder level checked against MAIN_LAB quantity
 // Recipients: QC Head, QC Assistant, all Shift Supervisors
+// Sends via Resend (HTTPS API) — avoids Render free-tier SMTP port block
 // ============================================================
 
 'use strict';
 
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 const supabase    = require('../config/supabase');
 
-// ── Mail transporter ──────────────────────────────────────
-const transporter = nodemailer.createTransport({
-  host  : process.env.SMTP_HOST,
-  port  : parseInt(process.env.SMTP_PORT || '587'),
-  secure: true,
-  family: 4, // force IPv4 (avoid IPv6 issues)
-  auth  : {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-});
+// ── Mail client ────────────────────────────────────────────
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 // ── Get recipient emails ──────────────────────────────────
 async function getRecipients() {
@@ -319,15 +311,16 @@ async function sendLowStockAlert({ triggerType, triggeredBy }) {
 
     const timestamp = new Date().toISOString();
     const html      = buildEmailHTML({ triggerType, triggeredBy, lowItems, allItems, timestamp });
-    const toList     = recipients.map(r => `"${r.name}" <${r.email}>`).join(', ');
-    const subject    = `⚠️ BUL QC Lab — ${lowItems.length} Item${lowItems.length!==1?'s':''} Below Reorder Level (Main Lab)`;
+    const subject   = `⚠️ BUL QC Lab — ${lowItems.length} Item${lowItems.length!==1?'s':''} Below Reorder Level (Main Lab)`;
 
-    await transporter.sendMail({
-      from: `"BUL QC LIMS" <${process.env.SMTP_USER}>`,
-      to  : toList,
+    const { data, error } = await resend.emails.send({
+      from   : 'BUL QC LIMS <onboarding@resend.dev>',
+      to     : recipients.map(r => r.email),
       subject,
       html,
     });
+
+    if (error) throw new Error(error.message || JSON.stringify(error));
 
     console.log(`[Inventory Email] Sent to ${recipients.length} recipient(s) — ${lowItems.length} low stock item(s)`);
     return { sent: true, recipients: recipients.length, lowStockCount: lowItems.length };
