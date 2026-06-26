@@ -199,12 +199,19 @@ exports.getLabStaff = async (req, res) => {
 
     let query = supabase
       .from('lab_staff')
-      .select('id, full_name, role')
+      .select('id, full_name, role, roles')
       .eq('is_active', true)
       .order('full_name', { ascending: true });
 
+    // Filter by role using the roles[] array — matches if the requested
+    // role OR "Both" appears anywhere in a person's roles list.
+    // Falls back to the old single `role` column for any row that hasn't
+    // been backfilled with roles[] yet (shouldn't happen after migration,
+    // but kept as a safety net).
     if (role && role !== 'All') {
-      query = query.or(`role.eq.${role},role.eq.Both`);
+      query = query.or(
+        `roles.cs.{${role}},roles.cs.{Both},role.eq.${role},role.eq.Both`
+      );
     }
 
     const { data, error } = await query;
@@ -232,25 +239,54 @@ exports.addLabStaff = async (req, res) => {
     }
 
     const staffRole = role || 'Both';
+    const trimmedName = full_name.trim();
+
+    // Check if this person already exists (case-insensitive) —
+    // if so, add the new role to their existing roles[] instead
+    // of creating a duplicate row.
+    const { data: existing } = await supabase
+      .from('lab_staff')
+      .select('id, full_name, role, roles')
+      .ilike('full_name', trimmedName)
+      .eq('is_active', true)
+      .maybeSingle();
+
+    if (existing) {
+      const currentRoles = existing.roles || (existing.role ? [existing.role] : []);
+      if (!currentRoles.includes(staffRole)) {
+        const updatedRoles = [...currentRoles, staffRole];
+        const { data: updated, error: updateErr } = await supabase
+          .from('lab_staff')
+          .update({ roles: updatedRoles })
+          .eq('id', existing.id)
+          .select('id, full_name, role, roles')
+          .single();
+        if (updateErr) return res.status(400).json({ error: updateErr.message });
+        return res.status(200).json({ staff: updated });
+      }
+      // Role already present — just return them as-is
+      return res.status(200).json({ staff: existing });
+    }
 
     const { data, error } = await supabase
       .from('lab_staff')
       .insert({
-        full_name : full_name.trim(),
+        full_name : trimmedName,
         role      : staffRole,
+        roles     : [staffRole],
         is_active : true,
       })
-      .select('id, full_name, role')
+      .select('id, full_name, role, roles')
       .single();
 
     if (error) {
       if (error.code === '23505') {
-        const { data: existing } = await supabase
+        const { data: existing2 } = await supabase
           .from('lab_staff')
-          .select('id, full_name, role')
-          .eq('full_name', full_name.trim())
+          .select('id, full_name, role, roles')
+          .ilike('full_name', trimmedName)
           .single();
-        return res.status(200).json({ staff: existing });
+        return res.status(200).json({ staff: existing2 });
       }
       return res.status(400).json({ error: error.message });
     }
