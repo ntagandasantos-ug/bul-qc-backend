@@ -1,29 +1,20 @@
 // ============================================================
-// FILE 1: backend/src/utils/emailService.js
-// CREATE this file — this is what Render cannot find
+// FILE: backend/src/utils/emailService.js
+// Sends verification emails for password/username changes.
+// Uses Resend (HTTPS API) instead of Gmail SMTP — Render's free
+// tier blocks outbound SMTP ports, the same issue we already
+// fixed for inventory low-stock alerts. Resend works reliably
+// since it sends over HTTPS (port 443), not SMTP.
 // ============================================================
 
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 
-// This file sends verification emails when users change
-// their password or username.
-// If GMAIL_USER is not set, email sending is skipped
-// gracefully — the server will NOT crash.
+const resend = new Resend(process.env.RESEND_API_KEY);
 
-let transporter = null;
-
-if (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD) {
-  transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.GMAIL_USER,
-      pass: process.env.GMAIL_APP_PASSWORD,
-    },
-  });
-  console.log('✅ Email service configured for:', process.env.GMAIL_USER);
+if (process.env.RESEND_API_KEY) {
+  console.log('✅ Email service configured (Resend)');
 } else {
-  console.log('⚠️  Email service not configured (GMAIL_USER or GMAIL_APP_PASSWORD missing)');
-  console.log('   Email verification will use console logging instead.');
+  console.log('⚠️  RESEND_API_KEY missing — email verification will use console logging instead.');
 }
 
 const sendVerificationCode = async (toEmail, code, changeType) => {
@@ -70,22 +61,26 @@ const sendVerificationCode = async (toEmail, code, changeType) => {
     </div>
   `;
 
-  // If no email configured, log code to console (useful during development)
-  if (!transporter) {
-    console.log(`\n📧 EMAIL NOT SENT (no GMAIL config)`);
+  // If Resend isn't configured at all, log the code so development
+  // and local testing can still proceed without a real send.
+  if (!process.env.RESEND_API_KEY) {
+    console.log(`\n📧 EMAIL NOT SENT (no RESEND_API_KEY configured)`);
     console.log(`   To: ${toEmail}`);
     console.log(`   Code: ${code}`);
     console.log(`   Type: ${changeType}\n`);
-    return true; // Return true so the flow continues
+    return true; // Return true so the flow continues during local dev
   }
 
   try {
-    await transporter.sendMail({
-      from   : `"BUL QC App" <${process.env.GMAIL_USER}>`,
-      to     : toEmail,
+    const { data, error } = await resend.emails.send({
+      from   : 'BUL QC App <onboarding@resend.dev>',
+      to     : [toEmail],
       subject,
       html,
     });
+
+    if (error) throw new Error(error.message || JSON.stringify(error));
+
     console.log(`✅ Verification email sent to ${toEmail}`);
     return true;
   } catch (err) {
